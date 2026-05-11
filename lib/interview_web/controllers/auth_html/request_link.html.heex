@@ -1,0 +1,27 @@
+<Layouts.app flash={@flash} current_scope={assigns[:current_scope]}>
+  <section class="zen-rise space-y-12 py-4 max-w-md">
+    <div class="space-y-5">
+      <p class="zen-eyebrow">§ — On its way</p>
+      <h1 class="font-display text-[clamp(2.5rem,7vw,4rem)] leading-[0.98] tracking-[-0.022em] font-light text-balance">
+        Check your <em class="italic font-light text-primary">inbox</em>.
+      </h1>
+      <p class="text-[16px] leading-[1.65] text-base-content/75 max-w-[38ch]">
+        If we recognize that address, a sign-in link is on its way.
+        Open it when you're ready — there's no hurry.
+      </p>
+    </div>
+
+    <hr class="zen-rule" />
+
+    <div class="flex flex-col sm:flex-row gap-x-10 gap-y-4 text-[15px]">
+      <.link href={~p"/auth/sign-in"} class="zen-link text-base-content/60 hover:text-base-content">
+        <span class="zen-arrow" aria-hidden="true">←</span>
+        <span>Use a different address</span>
+      </.link>
+      <.link href={~p"/"} class="zen-link text-base-content/60 hover:text-base-content">
+        <span class="zen-arrow" aria-hidden="true">→</span>
+        <span>Back to the front</span>
+      </.link>
+    </div>
+  </section>
+</Layouts.app>

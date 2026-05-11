@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fake Customer · Interview SDK Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #1a202c; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    h1 { font-size: 16px; font-weight: 600; margin: 0; }
+    .pill { background: #ffe066; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+    .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; min-height: 70vh; }
+    .panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+    #interview-mount { display: block; width: 100%; height: 100%; min-height: 600px; background: #000; }
+    .controls { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button, input { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e0; background: #fff; cursor: pointer; }
+    button.primary { background: #4c6ef5; color: white; border-color: #4c6ef5; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    label { font-size: 12px; color: #4a5568; }
+    pre { background: #0b1020; color: #d4e0ff; padding: 10px; border-radius: 6px; max-height: 360px; overflow: auto; font-size: 11px; line-height: 1.4; margin: 0; }
+    .err { color: #ff8a8a; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fake customer site <span class="pill">SDK demo</span></h1>
+    <div>Origin: <code id="origin"></code></div>
+  </header>
+
+  <div class="columns">
+    <div class="panel">
+      <div id="interview-mount"></div>
+    </div>
+
+    <div class="panel controls">
+      <div>
+        <label for="session">Session id</label>
+        <div class="row">
+          <input id="session" value="" style="flex: 1;" readonly />
+          <button id="mint">New session</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="popout" disabled>Continue in full window</button>
+        <button id="duplicate" disabled>Open second tab (same session)</button>
+        <button id="unmount" disabled>Unmount SDK</button>
+      </div>
+
+      <label>SDK callback log</label>
+      <pre id="log">no session yet — click "New session"</pre>
+    </div>
+  </div>
+
+  <!--
+    Pull the SDK from the recorder origin (cross-origin <script> works fine
+    without CORS). Customers do the same, just from their CDN.
+  -->
+  <script src="http://localhost:4000/embed.v1.js"></script>
+  <script>
+    const RECORDER_ORIGIN = "http://localhost:4000";
+
+    const sessionInput = document.getElementById("session");
+    const log = document.getElementById("log");
+    const mintBtn = document.getElementById("mint");
+    const popoutBtn = document.getElementById("popout");
+    const dupBtn = document.getElementById("duplicate");
+    const unmountBtn = document.getElementById("unmount");
+    document.getElementById("origin").textContent = location.origin;
+
+    let currentSid = null;
+    let handle = null;
+
+    function logLine(s, cls) {
+      const ts = new Date().toISOString().slice(11, 23);
+      const span = cls ? `<span class="${cls}">${s}</span>` : s;
+      log.innerHTML += `[${ts}] ${span}\n`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function mintNew() {
+      const r = await fetch("/session", { method: "POST" });
+      if (!r.ok) {
+        logLine(`mint failed: ${r.status} ${await r.text()}`, "err");
+        return null;
+      }
+      return r.json();
+    }
+
+    async function reBootstrap(sid) {
+      const r = await fetch(`/session/${encodeURIComponent(sid)}/bootstrap`, { method: "POST" });
+      if (!r.ok) {
+        logLine(`re-bootstrap failed: ${r.status} ${await r.text()}`, "err");
+        return null;
+      }
+      return r.json();
+    }
+
+    function setSession(sid) {
+      currentSid = sid;
+      sessionInput.value = sid;
+      popoutBtn.disabled = false;
+      dupBtn.disabled = false;
+      unmountBtn.disabled = false;
+      const url = new URL(location.href);
+      url.searchParams.set("sid", sid);
+      history.replaceState(null, "", url);
+    }
+
+    function clearMount() {
+      if (handle) { try { handle.unmount(); } catch (_) {} handle = null; }
+    }
+
+    function mountSession(sessionId, bootstrapToken) {
+      clearMount();
+      handle = YourInterview.mount("#interview-mount", {
+        sessionId,
+        bootstrapToken,
+        iframeSrc: RECORDER_ORIGIN,
+        onReady:       (e) => logLine("onReady "       + JSON.stringify(e)),
+        onSubmitted:   (e) => logLine("onSubmitted "   + JSON.stringify(e)),
+        onPermissions: (e) => logLine("onPermissions " + JSON.stringify(e)),
+        onRecording:   (e) => logLine("onRecording "   + JSON.stringify(e)),
+        onProgress:    (e) => logLine("onProgress "    + JSON.stringify(e)),
+        onError:       (e) => logLine("onError "       + JSON.stringify(e), "err"),
+        // Pop-out flow (PLAN §5.5): customer mints a NEW bootstrap;
+        // SDK opens it in a top-level window with noopener,noreferrer.
+        onPopoutRequested: async ({ sessionId }) => {
+          const j = await reBootstrap(sessionId);
+          if (!j) return null;
+          return { bootstrapToken: j.bootstrap_token };
+        },
+      });
+      logLine(`mounted sid=${sessionId} mobile=${handle.mobile}`);
+    }
+
+    mintBtn.onclick = async () => {
+      const j = await mintNew();
+      if (!j) return;
+      setSession(j.session_id);
+      mountSession(j.session_id, j.bootstrap_token);
+    };
+
+    popoutBtn.onclick = () => {
+      if (!handle) return;
+      handle.popout();
+      logLine("popout requested");
+    };
+
+    unmountBtn.onclick = () => {
+      clearMount();
+      logLine("unmounted");
+    };
+
+    dupBtn.onclick = () => {
+      if (!currentSid) return;
+      window.open(
+        `${location.origin}/?sid=${encodeURIComponent(currentSid)}`,
+        "_blank",
+        "noopener,noreferrer"
+      );
+    };
+
+    // Boot: a ?sid= URL re-bootstraps the same session (duplicate-tab case);
+    // otherwise mint a fresh one.
+    (async () => {
+      const urlSid = new URL(location.href).searchParams.get("sid");
+      if (urlSid) {
+        const j = await reBootstrap(urlSid);
+        if (j) {
+          setSession(j.session_id);
+          mountSession(j.session_id, j.bootstrap_token);
+        }
+      } else {
+        const j = await mintNew();
+        if (j) {
+          setSession(j.session_id);
+          mountSession(j.session_id, j.bootstrap_token);
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<Layouts.app flash={@flash} current_scope={assigns[:current_scope]}>
+  <section class="zen-rise min-h-[70svh] flex flex-col items-center justify-center text-center space-y-14">
+    <div class="space-y-6">
+      <p class="zen-eyebrow">§ — A note</p>
+      <h1 class="font-display text-[clamp(3rem,9vw,5.5rem)] leading-[0.96] tracking-[-0.022em] font-light text-balance">
+        Interview, <em class="italic font-light text-primary">unhurried</em>.
+      </h1>
+      <p class="text-[17px] leading-[1.65] text-base-content/75 max-w-[36ch] mx-auto">
+        A question. An answer. The quiet between.
+      </p>
+    </div>
+
+    <div class="flex flex-col sm:flex-row items-center justify-center gap-x-10 gap-y-4 text-[15px]">
+      <.link href={~p"/auth/sign-in"} class="zen-link text-base-content">
+        <span class="zen-arrow" aria-hidden="true">→</span>
+        <span>Sign in</span>
+      </.link>
+      <.link href={~p"/capture/new"} class="zen-link text-base-content/60 hover:text-base-content">
+        <span class="zen-arrow" aria-hidden="true">→</span>
+        <span>A quiet demo</span>
+      </.link>
+    </div>
+  </section>
+</Layouts.app>
