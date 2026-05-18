@@ -50,20 +50,35 @@ defmodule Interview.ExternalIntegration.ScoringExport do
         {:error, :not_found}
 
       %{session: %Session{state: "ready"} = session, questions: question_cards} ->
-        {:ok,
-         %{
-           session_id: session.id,
-           external_id: session.external_id,
-           tenant_id: session.tenant_id,
-           candidate_email: session.candidate_email,
-           completed_at: session.completed_at,
-           state: session.state,
-           interview_transcript: Enum.map(question_cards, &transcript_entry/1)
-         }}
+        if transcripts_ready?(question_cards) do
+          {:ok,
+           %{
+             session_id: session.id,
+             external_id: session.external_id,
+             tenant_id: session.tenant_id,
+             candidate_email: session.candidate_email,
+             completed_at: session.completed_at,
+             state: session.state,
+             interview_transcript: Enum.map(question_cards, &transcript_entry/1)
+           }}
+        else
+          # Session is finalized but the async Whisper jobs haven't all
+          # landed yet. Without this guard, a caller racing the
+          # session.ready webhook can read answer_text: nil for any
+          # question whose transcript is still pending.
+          {:error, :not_ready}
+        end
 
       %{session: %Session{}} ->
         {:error, :not_ready}
     end
+  end
+
+  defp transcripts_ready?(question_cards) do
+    Enum.all?(question_cards, fn
+      %{selected_response: %{transcript_ready_at: t}} when not is_nil(t) -> true
+      _ -> false
+    end)
   end
 
   defp transcript_entry(%{
