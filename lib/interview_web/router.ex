@@ -164,6 +164,7 @@ defmodule InterviewWeb.Router do
     post "/sessions", SessionController, :create
     post "/sessions/:id/bootstrap", SessionController, :rebootstrap
     delete "/sessions/:id", SessionController, :delete
+    get "/sessions/:id/scoring_export", ScoringExportController, :show
   end
 
   # Chrome DevTools probes this URL when DevTools is open. Return 204 so
