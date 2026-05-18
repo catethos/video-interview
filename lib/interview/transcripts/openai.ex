@@ -93,15 +93,46 @@ defmodule Interview.Transcripts.OpenAI do
     dash = "--"
     crlf = "\r\n"
 
+    # Force English transcription. Whisper's auto-detect routinely
+    # misroutes Malaysian-/Singaporean-accent English to Bahasa Malaysia
+    # / Indonesian because of the prosody. Hardcoded "en" for now;
+    # post-demo, expose this per-question on the template so companies
+    # doing multilingual assessments can specify the expected answer
+    # language per item (and gibberish output then serves as a clear
+    # signal the candidate answered in the wrong language).
     [
-      dash, boundary, crlf,
-      "Content-Disposition: form-data; name=\"model\"", crlf, crlf,
-      @model, crlf,
-      dash, boundary, crlf,
-      "Content-Disposition: form-data; name=\"file\"; filename=\"", filename, "\"", crlf,
-      "Content-Type: application/octet-stream", crlf, crlf,
-      file_bytes, crlf,
-      dash, boundary, dash, crlf
+      dash,
+      boundary,
+      crlf,
+      "Content-Disposition: form-data; name=\"model\"",
+      crlf,
+      crlf,
+      @model,
+      crlf,
+      dash,
+      boundary,
+      crlf,
+      "Content-Disposition: form-data; name=\"language\"",
+      crlf,
+      crlf,
+      "en",
+      crlf,
+      dash,
+      boundary,
+      crlf,
+      "Content-Disposition: form-data; name=\"file\"; filename=\"",
+      filename,
+      "\"",
+      crlf,
+      "Content-Type: application/octet-stream",
+      crlf,
+      crlf,
+      file_bytes,
+      crlf,
+      dash,
+      boundary,
+      dash,
+      crlf
     ]
     |> IO.iodata_to_binary()
   end
