@@ -50,6 +50,14 @@ defmodule InterviewWeb.Router do
     plug InterviewWeb.Plugs.RecruiterAuth
   end
 
+  # Token-authenticated browser routes for signed playback URLs (PLAN
+  # §8.5 change 3). No session, no cookie — auth happens entirely via
+  # the `?token=...` query param verified inside the controller. This
+  # lets an external recruiter dashboard embed `<video src=...>` with
+  # a Pulsifi-minted signed URL.
+  pipeline :signed_playback do
+  end
+
   # Recruiter-authenticated form POSTs (multipart). Cookie session + CSRF
   # required — these handle multipart file uploads from the recruiter
   # dashboard.
@@ -88,6 +96,12 @@ defmodule InterviewWeb.Router do
     pipe_through :recruiter_browser
 
     get "/recruiter/playback/:response_id", PlaybackController, :show
+  end
+
+  scope "/", InterviewWeb do
+    pipe_through :signed_playback
+
+    get "/playback/:response_id", PlaybackController, :show_signed
   end
 
   scope "/", InterviewWeb do
@@ -165,6 +179,7 @@ defmodule InterviewWeb.Router do
     post "/sessions/:id/bootstrap", SessionController, :rebootstrap
     delete "/sessions/:id", SessionController, :delete
     get "/sessions/:id/scoring_export", ScoringExportController, :show
+    post "/responses/:id/playback_url", PlaybackUrlController, :create
   end
 
   # Chrome DevTools probes this URL when DevTools is open. Return 204 so

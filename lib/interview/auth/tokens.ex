@@ -36,6 +36,9 @@ defmodule Interview.Auth.Tokens do
   @recruiter_max_age 86_400
   @recruiter_prefix "rk_"
 
+  @playback_url_salt "playback:url"
+  @playback_url_max_age 3600
+
   # ---- Bootstrap -----------------------------------------------------------
 
   def mint_bootstrap(session_id, tenant_id) when is_binary(session_id) and is_binary(tenant_id) do
@@ -127,4 +130,34 @@ defmodule Interview.Auth.Tokens do
 
   def recruiter_session_max_age, do: @recruiter_max_age
   def recruiter_prefix, do: @recruiter_prefix
+
+  # ---- Playback URL token --------------------------------------------------
+
+  @doc """
+  Short-lived signed URL token for embedding a response's MP4 in an
+  external recruiter dashboard (PLAN §8.5 change 3).
+
+  Carries `%{rid, tid}` — the response id this token authorizes, scoped to
+  a single tenant. The playback controller verifies BOTH that the token is
+  valid AND that the requested response id matches the payload's `rid`, so
+  a leaked token can never be repurposed for a different response.
+
+  TTL: 1 hour. Leaked URLs die on their own; no revocation surface needed.
+  """
+  def mint_playback_url_token(response_id, tenant_id)
+      when is_binary(response_id) and is_binary(tenant_id) do
+    Phoenix.Token.sign(Endpoint, @playback_url_salt, %{rid: response_id, tid: tenant_id})
+  end
+
+  def verify_playback_url_token(token) when is_binary(token) do
+    case Phoenix.Token.verify(Endpoint, @playback_url_salt, token, max_age: @playback_url_max_age) do
+      {:ok, %{rid: rid, tid: tid}} -> {:ok, %{rid: rid, tid: tid}}
+      {:error, :expired} -> {:error, :expired}
+      {:error, _} -> {:error, :invalid}
+    end
+  end
+
+  def verify_playback_url_token(_), do: {:error, :invalid}
+
+  def playback_url_max_age, do: @playback_url_max_age
 end

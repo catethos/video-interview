@@ -24,17 +24,44 @@ defmodule InterviewWeb.PlaybackController do
   """
   use InterviewWeb, :controller
 
+  alias Interview.Auth.Tokens
   alias Interview.Playback
   alias Interview.Storage
 
   @cache_control "private, max-age=60"
   @content_type "video/mp4"
 
+  @doc """
+  Recruiter dashboard playback (cookie-authenticated). The
+  `:recruiter_browser` pipeline has already verified the recruiter
+  session and populated `conn.assigns.tenant`.
+  """
   def show(conn, %{"response_id" => response_id}) do
-    tenant = conn.assigns.tenant
+    serve(conn, conn.assigns.tenant.id, response_id)
+  end
 
+  @doc """
+  External / signed-URL playback (no cookie required). Verifies the
+  `?token=...` query param via `Interview.Auth.Tokens.verify_playback_url_token/1`
+  and serves only if the token's `rid` matches the requested response id
+  AND the token's tenant matches the response's tenant.
+
+  A stolen token cannot be repurposed for a different response: the
+  controller checks `token.rid == path :response_id` before serving.
+  """
+  def show_signed(conn, %{"response_id" => response_id} = params) do
+    with token when is_binary(token) <- params["token"] || :missing_token,
+         {:ok, %{rid: rid, tid: tid}} <- Tokens.verify_playback_url_token(token),
+         true <- rid == response_id do
+      serve(conn, tid, response_id)
+    else
+      _ -> not_found(conn)
+    end
+  end
+
+  defp serve(conn, tenant_id, response_id) do
     with %{state: "ready", storage_key: key} = response when is_binary(key) <-
-           Playback.get_response_for_playback(tenant.id, response_id),
+           Playback.get_response_for_playback(tenant_id, response_id),
          path = Storage.artifact_path(key),
          {:ok, %{size: size}} <- File.stat(path) do
       send_artifact(conn, path, size, response)
