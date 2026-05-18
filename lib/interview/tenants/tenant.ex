@@ -15,6 +15,7 @@ defmodule Interview.Tenants.Tenant do
     field :webhook_secret, :string
     field :retention_days, :integer, default: 90
     field :branding, :map, default: %{}
+    field :allowed_return_origins, {:array, :string}, default: []
 
     timestamps()
   end
@@ -28,11 +29,13 @@ defmodule Interview.Tenants.Tenant do
       :webhook_url,
       :webhook_secret,
       :retention_days,
-      :branding
+      :branding,
+      :allowed_return_origins
     ])
     |> validate_required([:name, :slug])
     |> validate_number(:retention_days, greater_than: 0)
     |> validate_webhook_url()
+    |> validate_allowed_return_origins()
     |> put_default_webhook_secret()
     |> unique_constraint(:slug)
   end
@@ -67,6 +70,37 @@ defmodule Interview.Tenants.Tenant do
       end
     end)
   end
+
+  # Each entry must be a syntactically valid http(s) origin: scheme + host
+  # (+ optional port). Path/query/fragment are rejected — origins only.
+  defp validate_allowed_return_origins(changeset) do
+    validate_change(changeset, :allowed_return_origins, fn :allowed_return_origins, origins ->
+      origins
+      |> Enum.flat_map(fn origin ->
+        case origin_shape(origin) do
+          :ok -> []
+          {:error, reason} -> [allowed_return_origins: "#{origin}: #{reason}"]
+        end
+      end)
+    end)
+  end
+
+  defp origin_shape(origin) when is_binary(origin) do
+    case URI.new(origin) do
+      {:ok, %URI{scheme: scheme, host: host, path: path, query: q, fragment: f}}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" and
+             (is_nil(path) or path == "") and is_nil(q) and is_nil(f) ->
+        :ok
+
+      {:ok, _} ->
+        {:error, "must be a bare origin (scheme + host [+ port]) with no path/query/fragment"}
+
+      {:error, _} ->
+        {:error, "is not a valid URL"}
+    end
+  end
+
+  defp origin_shape(_), do: {:error, "must be a string"}
 
   defp webhook_url_message(:invalid_url), do: "is not a valid URL"
   defp webhook_url_message(:scheme_required), do: "must use https://"

@@ -73,6 +73,7 @@ defmodule InterviewWeb.Router do
 
     live_session :recruiter, on_mount: [{InterviewWeb.UserAuth, :ensure_recruiter}] do
       live "/recruiter/templates", RecruiterTemplatesLive, :index
+      live "/recruiter/templates/new", RecruiterTemplateNewLive
       live "/recruiter/templates/:id", RecruiterTemplateLive
       live "/recruiter/templates/:tid/questions/:qid/prompt", RecruiterPromptRecorderLive
       live "/recruiter/sessions", RecruiterSessionsLive, :index
