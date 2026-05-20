@@ -53,4 +53,8 @@ defmodule InterviewWeb.ScoringExportController do
       interview_transcript: p.interview_transcript
     }
   end
+
+  # transcript entries now include response_id + duration_ms so callers
+  # can mint per-question playback URLs and show clip length in the UI.
+  # Existing consumers tolerating extra map keys are unaffected.
 end

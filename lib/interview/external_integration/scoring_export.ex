@@ -31,7 +31,9 @@ defmodule Interview.ExternalIntegration.ScoringExport do
   @type transcript_entry :: %{
           question_number: pos_integer(),
           question_text: String.t(),
-          answer_text: String.t() | nil
+          answer_text: String.t() | nil,
+          response_id: String.t() | nil,
+          duration_ms: non_neg_integer() | nil
         }
 
   @doc """
@@ -88,7 +90,9 @@ defmodule Interview.ExternalIntegration.ScoringExport do
     %{
       question_number: q.position,
       question_text: q.prompt_text,
-      answer_text: selected_response && selected_response.transcript_text
+      answer_text: selected_response && selected_response.transcript_text,
+      response_id: selected_response && selected_response.id,
+      duration_ms: selected_response && selected_response.duration_ms
     }
   end
 end
