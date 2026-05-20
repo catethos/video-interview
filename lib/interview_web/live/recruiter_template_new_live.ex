@@ -32,7 +32,8 @@ defmodule InterviewWeb.RecruiterTemplateNewLive do
     }
 
     with {:ok, template} <- Templates.create_template(attrs),
-         {:ok, _draft} <- Templates.create_draft_version(template) do
+         {:ok, draft} <- Templates.create_draft_version(template),
+         {:ok, _stamped} <- stamp_external_return(draft, params) do
       query = passthrough_query(params)
       target = "/recruiter/templates/#{template.id}" <> query
       {:ok, push_navigate(socket, to: target)}
@@ -52,6 +53,24 @@ defmodule InterviewWeb.RecruiterTemplateNewLive do
     ~H"""
     <main class="p-8 text-slate-500">Setting up your interview template…</main>
     """
+  end
+
+  # Persist return_to/state on the draft so a subsequent re-mount of
+  # RecruiterTemplateLive can rebuild external_integration even if an
+  # in-LV navigation (e.g. the prompt recorder) stripped them from the
+  # URL. No-op when the deep-link wasn't initiated externally.
+  defp stamp_external_return(draft, params) do
+    return_to = params["return_to"]
+    state = params["state"]
+
+    if is_binary(return_to) and return_to != "" do
+      Templates.update_draft_version(draft, %{
+        "external_return_url" => return_to,
+        "external_return_state" => state
+      })
+    else
+      {:ok, draft}
+    end
   end
 
   defp sanitize_name(nil), do: default_name()

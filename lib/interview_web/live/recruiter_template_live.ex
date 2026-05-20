@@ -43,7 +43,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
         {:ok, draft} = ensure_draft(template, draft)
         questions = Templates.list_questions(draft)
         assets = load_assets_for(questions)
-        external_integration = build_external_integration(params, socket.assigns.tenant)
+        external_integration = build_external_integration(params, socket.assigns.tenant, draft)
 
         {:ok,
          socket
@@ -67,9 +67,16 @@ defmodule InterviewWeb.RecruiterTemplateLive do
   # back to the caller with the new template UUID. Invalid `return_to`s are
   # silently dropped (the LiveView still works for the recruiter — they just
   # land on the normal post-publish detail page).
-  defp build_external_integration(params, tenant) do
-    case ReturnTo.validate(params["return_to"], tenant.allowed_return_origins) do
-      {:ok, uri} -> %{return_to_uri: uri, state: params["state"]}
+  #
+  # Falls back to fields stored on the draft when the URL doesn't carry
+  # the params — this covers the case where an in-LV navigation (e.g. the
+  # prompt recorder's post-attach push_navigate) strips the query mid-edit.
+  defp build_external_integration(params, tenant, draft) do
+    return_to = params["return_to"] || draft.external_return_url
+    state = params["state"] || draft.external_return_state
+
+    case ReturnTo.validate(return_to, tenant.allowed_return_origins) do
+      {:ok, uri} -> %{return_to_uri: uri, state: state}
       {:error, _} -> nil
     end
   end
