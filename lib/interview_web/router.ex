@@ -77,6 +77,7 @@ defmodule InterviewWeb.Router do
     get "/auth/sign-in", AuthController, :sign_in
     post "/auth/sign-in", AuthController, :request_link_form
     get "/auth/magic-link/:token", MagicLinkController, :consume
+    get "/auth/handoff", RecruiterHandoffController, :consume
     delete "/auth/sign-out", AuthController, :sign_out
 
     live_session :recruiter, on_mount: [{InterviewWeb.UserAuth, :ensure_recruiter}] do
@@ -180,6 +181,7 @@ defmodule InterviewWeb.Router do
     delete "/sessions/:id", SessionController, :delete
     get "/sessions/:id/scoring_export", ScoringExportController, :show
     post "/responses/:id/playback_url", PlaybackUrlController, :create
+    post "/recruiter-handoffs", RecruiterHandoffController, :create
   end
 
   # Chrome DevTools probes this URL when DevTools is open. Return 204 so

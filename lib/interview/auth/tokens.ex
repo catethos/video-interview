@@ -160,4 +160,38 @@ defmodule Interview.Auth.Tokens do
   def verify_playback_url_token(_), do: {:error, :invalid}
 
   def playback_url_max_age, do: @playback_url_max_age
+
+  # ---- Recruiter handoff token --------------------------------------------
+
+  @recruiter_handoff_salt "recruiter:handoff"
+  @recruiter_handoff_max_age 300
+
+  @doc """
+  One-shot token used to bootstrap a recruiter session from an external
+  system that already holds the tenant API key (e.g. Pulsifi). The
+  external system mints this token server-to-server via
+  `POST /api/recruiter-handoffs`, embeds it in a URL the recruiter's
+  browser visits, and VI's `/auth/handoff` controller swaps it for a
+  real recruiter session cookie before forwarding to the deep-link
+  target. TTL is short — the URL is meant to be redeemed immediately
+  by the very next click in the browser.
+  """
+  def mint_recruiter_handoff(recruiter_id, tenant_id)
+      when is_binary(recruiter_id) and is_binary(tenant_id) do
+    Phoenix.Token.sign(Endpoint, @recruiter_handoff_salt, %{rid: recruiter_id, tid: tenant_id})
+  end
+
+  def verify_recruiter_handoff(token) when is_binary(token) do
+    case Phoenix.Token.verify(Endpoint, @recruiter_handoff_salt, token,
+           max_age: @recruiter_handoff_max_age
+         ) do
+      {:ok, %{rid: rid, tid: tid}} -> {:ok, %{rid: rid, tid: tid}}
+      {:error, :expired} -> {:error, :expired}
+      {:error, _} -> {:error, :invalid}
+    end
+  end
+
+  def verify_recruiter_handoff(_), do: {:error, :invalid}
+
+  def recruiter_handoff_max_age, do: @recruiter_handoff_max_age
 end

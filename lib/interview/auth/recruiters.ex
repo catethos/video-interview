@@ -32,6 +32,18 @@ defmodule Interview.Auth.Recruiters do
   end
 
   @doc """
+  Pick the recruiter to use for an external-system handoff. External
+  systems (Pulsifi) authenticate via the tenant API key and don't carry
+  per-recruiter identity, so we resolve a deterministic recruiter for
+  the tenant — currently the alphabetically first one. Returns `nil`
+  when the tenant has no recruiters.
+  """
+  def get_handoff_recruiter(tenant_id) when is_binary(tenant_id) do
+    from(u in User, where: u.tenant_id == ^tenant_id, order_by: u.email, limit: 1)
+    |> Repo.one()
+  end
+
+  @doc """
   Create a recruiter for a tenant. Email is downcased + trimmed; uniqueness
   is global (one human, one email).
   """
