@@ -28,7 +28,9 @@ const Recorder = {
 
     this.preview = this.el.querySelector('video[data-role="preview"]');
     this.countdownEl = this.el.querySelector('[data-role="recording-countdown"]');
+    this.micLevelEl = this.el.querySelector('[data-role="mic-level"]');
     this.countdownTimer = null;
+    this.micLevelFrame = null;
     this.bind("request", () => {
       // Optimistic LV ping so the UI can react the instant the candidate
       // commits — getUserMedia + the browser permission dialog can take
@@ -95,6 +97,7 @@ const Recorder = {
     }
     if (this.core) this.core.destroy();
     this.stopRecordingCountdown();
+    this.stopMicLevelLoop();
   },
 
   // --- Core event bridge ----------------------------------------------
@@ -107,8 +110,12 @@ const Recorder = {
 
       case "permission": {
         this.pushEvent("permission", payload);
-        if (payload.state === "granted") this.postToParent({ type: "permissions_granted" });
+        if (payload.state === "granted") {
+          this.postToParent({ type: "permissions_granted" });
+          this.startMicLevelLoop();
+        }
         if (payload.state === "denied") this.postToParent({ type: "permissions_denied" });
+        if (payload.state === "released") this.stopMicLevelLoop();
         break;
       }
 
@@ -383,6 +390,43 @@ const Recorder = {
 
     this.countdownEl.classList.toggle("recording-countdown-receding", remaining <= 15);
     this.countdownEl.classList.toggle("recording-countdown-warning", remaining <= 5);
+  },
+
+  // --- Mic-level indicator --------------------------------------------
+  //
+  // After permission is granted, render a live audio level so the
+  // candidate can confirm their mic is being picked up. Drives a CSS
+  // custom property on the mic-level element via requestAnimationFrame
+  // — no LV roundtrip per frame.
+
+  startMicLevelLoop() {
+    if (!this.micLevelEl || !this.core) return;
+    if (this.micLevelFrame) return;
+    const tick = () => {
+      if (!this.core) return;
+      const level = this.core.getMicLevel(); // 0..1
+      // Normalize to a visually useful range — typical conversational
+      // speech sits around 0.05..0.20 RMS, so we scale to fill the bar
+      // at ~0.4 RMS to avoid a sluggish-looking meter.
+      const display = Math.min(1, level * 2.5);
+      this.micLevelEl.style.setProperty("--mic-level", display.toFixed(3));
+      // Mark "live" once we see a non-trivial signal — the candidate
+      // can use this as a quick visual confirmation.
+      this.micLevelEl.classList.toggle("mic-level-live", display > 0.04);
+      this.micLevelFrame = requestAnimationFrame(tick);
+    };
+    this.micLevelFrame = requestAnimationFrame(tick);
+  },
+
+  stopMicLevelLoop() {
+    if (this.micLevelFrame) {
+      cancelAnimationFrame(this.micLevelFrame);
+      this.micLevelFrame = null;
+    }
+    if (this.micLevelEl) {
+      this.micLevelEl.style.removeProperty("--mic-level");
+      this.micLevelEl.classList.remove("mic-level-live");
+    }
   },
 };
 

@@ -1331,6 +1331,15 @@ defmodule InterviewWeb.CaptureLive do
           <span class="zen-arrow" aria-hidden="true">■</span>
           <span>Stop</span>
         </button>
+        <span
+          data-role="mic-level"
+          class="mic-level ml-auto"
+          aria-hidden="true"
+          title="Microphone input level"
+        >
+          <span class="mic-level-bar"></span>
+          <span class="mic-level-label">Mic</span>
+        </span>
       </div>
     </section>
     """

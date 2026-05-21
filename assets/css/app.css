@@ -464,6 +464,52 @@ body > * { position: relative; z-index: 1; }
   display: none;
 }
 
+/* Mic-level indicator — small bar next to the recorder action links
+ * that fills based on a CSS custom property `--mic-level` (0..1)
+ * driven by the Recorder hook's requestAnimationFrame loop.
+ *
+ * Visible only when the candidate can do something with this info:
+ * permission granted AND phase is :intro or :prep. Once recording
+ * starts the recording-time countdown owns the bottom of the frame
+ * and the mic level is redundant noise. */
+.mic-level {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  --mic-level: 0;
+}
+[data-camera-state="on"][data-phase="intro"] .mic-level,
+[data-camera-state="on"][data-phase="prep"] .mic-level {
+  display: inline-flex;
+}
+.mic-level-bar {
+  position: relative;
+  display: inline-block;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in oklch, var(--color-base-content) 12%, transparent);
+  overflow: hidden;
+}
+.mic-level-bar::after {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: calc(var(--mic-level) * 100%);
+  background: color-mix(in oklch, var(--color-base-content) 70%, transparent);
+  transition: width 80ms ease-out, background-color 200ms ease;
+}
+.mic-level.mic-level-live .mic-level-bar::after {
+  background: var(--color-primary, #0aa3b3);
+}
+.mic-level-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+}
+
 /* Cinematic 3-2-1 overlay during the last few seconds of think-time
  * (and the last few seconds of the post-thinktime idle window). Big
  * semi-transparent numeral centered on the preview, like a movie
