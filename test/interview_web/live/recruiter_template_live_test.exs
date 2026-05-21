@@ -61,9 +61,16 @@ defmodule InterviewWeb.RecruiterTemplateLiveTest do
     assert draft
     assert draft.retake_policy["mode"] == "first_only"
 
+    # Both inputs live inside a wrapping <form phx-change="update_retake">
+    # now, so any change submits BOTH fields together. Drive the form
+    # to mimic the recruiter selecting 'last' while max_attempts holds
+    # the rendered value (server-side state).
     view
-    |> element(~s|select[phx-change="update_retake"][name="mode"]|)
-    |> render_change(%{mode: "last"})
+    |> form(~s|form[phx-change="update_retake"]|, %{
+      "max_attempts" => "#{draft.retake_policy["max_attempts"]}",
+      "mode" => "last"
+    })
+    |> render_change()
 
     reloaded = Interview.Repo.get!(Interview.Templates.Version, draft.id)
 

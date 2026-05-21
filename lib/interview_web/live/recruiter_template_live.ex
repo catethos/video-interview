@@ -595,25 +595,35 @@ defmodule InterviewWeb.RecruiterTemplateLive do
           </button>
           <div class="section-shutter">
             <div class="pt-5">
-              <div class="grid grid-cols-2 gap-x-10 gap-y-5 max-w-md">
+              <%!--
+                Wrap both inputs in a single <form phx-change>. Any change
+                event then carries the CURRENT DOM value of EVERY named
+                field — fixes the prior bug where typing '2' in max_attempts
+                then clicking the mode select made the server overwrite
+                max_attempts back to 1 (because the select fired phx-change
+                before the input fired phx-blur, and the re-render used
+                stale server state).
+                phx-debounce keeps per-keystroke max_attempts changes from
+                spamming the websocket.
+              --%>
+              <form
+                phx-change="update_retake"
+                phx-debounce="400"
+                class="grid grid-cols-2 gap-x-10 gap-y-5 max-w-md"
+              >
                 <label class="block space-y-2">
                   <span class="zen-eyebrow opacity-65">Max attempts</span>
                   <input
                     type="number"
                     min="1"
                     value={@draft.retake_policy["max_attempts"]}
-                    phx-blur="update_retake"
                     name="max_attempts"
                     class="input input-sm w-full"
                   />
                 </label>
                 <label class="block space-y-2">
                   <span class="zen-eyebrow opacity-65">Mode</span>
-                  <select
-                    phx-change="update_retake"
-                    name="mode"
-                    class="select select-sm w-full"
-                  >
+                  <select name="mode" class="select select-sm w-full">
                     <option value="first_only" selected={@draft.retake_policy["mode"] == "first_only"}>
                       first only
                     </option>
@@ -622,7 +632,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
                     </option>
                   </select>
                 </label>
-              </div>
+              </form>
             </div>
           </div>
         </section>
