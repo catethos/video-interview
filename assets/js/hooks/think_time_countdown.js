@@ -21,10 +21,15 @@
 
 const SPELL = ["", "one", "two", "three", "four", "five"];
 
-// Number of seconds at the END of think-time where the cinematic
-// 3-2-1 overlay flashes on the camera preview. Matches the post-
-// thinktime auto-start window's last-3-seconds cinematic (Pass B).
+// Number of seconds at the END of think-time AND the END of the
+// idle window where the cinematic 3-2-1 overlay flashes on the
+// camera preview.
 const CINEMATIC_LAST_SECONDS = 3;
+
+// After think-time runs out, how long the candidate has to click
+// Record before it auto-starts. Closes the cheating window — without
+// it the candidate could sit idle indefinitely after the prep window.
+const IDLE_AUTO_START_SECONDS = 10;
 
 const ThinkTimeCountdown = {
   mounted() {
@@ -32,13 +37,24 @@ const ThinkTimeCountdown = {
     if (!Number.isInteger(total) || total <= 0) return;
 
     this.remaining = total;
+    this.idleRemaining = null;
+    // Listen for the candidate manually starting recording (or any
+    // phase transition out of :prep) — when that happens, cancel
+    // the idle auto-start timer and clear the cinematic overlay.
+    this.onRecorderStarted = () => this.cancelIdleTimer();
+    document.addEventListener("candidate:recorder-started", this.onRecorderStarted);
+
     this.render();
     this.timer = setInterval(() => this.tick(), 1000);
   },
 
   destroyed() {
     this.clear();
+    this.cancelIdleTimer();
     this.clearCinematic();
+    if (this.onRecorderStarted) {
+      document.removeEventListener("candidate:recorder-started", this.onRecorderStarted);
+    }
   },
 
   clear() {
@@ -48,19 +64,71 @@ const ThinkTimeCountdown = {
     }
   },
 
+  cancelIdleTimer() {
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.idleRemaining = null;
+    this.clearCinematic();
+  },
+
   tick() {
     this.remaining -= 1;
     if (this.remaining <= 0) {
       this.clear();
       this.remaining = 0;
       this.render();
-      // No LV push on zero. Recording start is candidate-driven (Open
-      // camera → Record click); the server doesn't need to know
-      // think-time ended for any current behavior. Phase 2 may add an
-      // a11y announcement event here.
+      // Start the post-thinktime idle timer. If the candidate doesn't
+      // click Record within IDLE_AUTO_START_SECONDS, recording auto-
+      // starts (cheating window mitigation).
+      this.startIdleTimer();
       return;
     }
     this.render();
+  },
+
+  startIdleTimer() {
+    // Bail out if we're no longer in :prep (the candidate may have
+    // clicked Record while the main timer was rendering its zero
+    // tick — race condition we don't want to fight against).
+    if (!isPhasePrep()) return;
+
+    this.idleRemaining = IDLE_AUTO_START_SECONDS;
+    this.renderIdle();
+    this.idleTimer = setInterval(() => this.idleTick(), 1000);
+  },
+
+  idleTick() {
+    // Cheap guard: if the LV moved us out of :prep (manual start,
+    // navigation, anything), drop the timer instead of fighting it.
+    if (!isPhasePrep()) {
+      this.cancelIdleTimer();
+      return;
+    }
+
+    this.idleRemaining -= 1;
+    if (this.idleRemaining <= 0) {
+      this.cancelIdleTimer();
+      // Hand off to the Recorder hook — it owns the actual recording
+      // lifecycle. Dispatched as a bubbling DOM event so the hook
+      // can listen at document level.
+      document.dispatchEvent(new CustomEvent("candidate:auto-start-recording"));
+      return;
+    }
+    this.renderIdle();
+  },
+
+  renderIdle() {
+    const n = this.idleRemaining;
+    if (n > CINEMATIC_LAST_SECONDS) {
+      this.el.textContent = `Ready when you are. Recording starts in ${n} seconds.`;
+    } else {
+      // Last 3 seconds — phrase shrinks to just "Recording starts in N."
+      // and the cinematic numeral takes over visually.
+      this.el.textContent = `Recording starts in ${SPELL[n] || n}.`;
+      this.renderCinematic(n);
+    }
   },
 
   // Two visual states:
@@ -110,5 +178,14 @@ const ThinkTimeCountdown = {
     el.classList.remove("cinematic-countdown-tick");
   },
 };
+
+// The wrapper around the recorder + actions carries data-phase
+// updated by LiveView. We use it as the source of truth for "is
+// the candidate still in the prep window?" — querying the recorder
+// section directly is unreliable because of phx-update="ignore".
+function isPhasePrep() {
+  const el = document.querySelector("[data-phase]");
+  return !!el && el.dataset.phase === "prep";
+}
 
 export default ThinkTimeCountdown;

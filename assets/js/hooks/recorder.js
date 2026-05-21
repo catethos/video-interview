@@ -52,6 +52,14 @@ const Recorder = {
     });
     this.handleEvent("post_to_parent", (payload) => this.postToParent(payload));
 
+    // Cross-hook handoff from ThinkTimeCountdown: when the post-
+    // thinktime idle window expires, recording must start whether
+    // the candidate clicked Record or not (cheating-window mitigation).
+    // Listening at document level because the dispatcher (an external
+    // hook) can't reach into this section's DOM directly.
+    this.onAutoStart = () => this.startRecording();
+    document.addEventListener("candidate:auto-start-recording", this.onAutoStart);
+
     if (window.parent && window.parent !== window) {
       this.bindPostMessage();
       this.postToParent({ type: "ready" });
@@ -82,6 +90,9 @@ const Recorder = {
 
   destroyed() {
     if (this.onMessage) window.removeEventListener("message", this.onMessage);
+    if (this.onAutoStart) {
+      document.removeEventListener("candidate:auto-start-recording", this.onAutoStart);
+    }
     if (this.core) this.core.destroy();
     this.stopRecordingCountdown();
   },
@@ -104,6 +115,9 @@ const Recorder = {
       case "recorder_started":
         this.startRecordingCountdown();
         this.pushEvent("recorder_started", payload);
+        // Notify other hooks (e.g. ThinkTimeCountdown's idle timer)
+        // so they can cancel any pending auto-start logic.
+        document.dispatchEvent(new CustomEvent("candidate:recorder-started"));
         this.postToParent({ type: "recording_started", position: this.state.questionIndex });
         break;
 
