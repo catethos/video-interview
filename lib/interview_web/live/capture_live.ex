@@ -8,14 +8,16 @@ defmodule InterviewWeb.CaptureLive do
   alias Interview.Capture.Session
 
   # Per-question phase machine (within the candidate flow):
-  #   :awaiting_auth — page shown before bootstrap consumed; hook posts `ready`.
-  #   :prep      — prompt visible, optional think-time countdown active.
-  #   :recording — MediaRecorder running.
-  #   :draining  — MediaRecorder stopped; uploader still flushing IDB → tus.
-  #   :answered  — capture_complete acked; question is done for this attempt.
-  #   :review    — past the last question; review + submit screen.
-  #   :submitted — submit accepted by server; session.state = submitted/ready.
-  #   :fenced    — another tab/instance took over the writer.
+  #   :awaiting_auth     — page shown before bootstrap consumed; hook posts `ready`.
+  #   :intro             — welcome screen + AI-evaluation disclosure + "I'm ready" gate.
+  #   :permission_denied — candidate denied camera/mic permission; offers retry.
+  #   :prep              — prompt visible, optional think-time countdown active.
+  #   :recording         — MediaRecorder running.
+  #   :draining          — MediaRecorder stopped; uploader still flushing IDB → tus.
+  #   :answered          — capture_complete acked; question is done for this attempt.
+  #   :review            — past the last question; review + submit screen.
+  #   :submitted         — submit accepted by server; session.state = submitted/ready.
+  #   :fenced            — another tab/instance took over the writer.
 
   @impl true
   def mount(%{"session_id" => session_id} = params, _session, socket) do
@@ -163,7 +165,11 @@ defmodule InterviewWeb.CaptureLive do
   defp initial_phase([], _session), do: :review
   defp initial_phase(_questions, %Session{state: "submitted"}), do: :submitted
   defp initial_phase(_questions, %Session{state: "ready"}), do: :submitted
-  defp initial_phase(_questions, _session), do: :prep
+  # Fresh session: candidate sees the intro/disclosure gate before Q1.
+  # In_progress sessions (mid-interview) skip straight to the question
+  # flow — they've already accepted the gate on a prior page-load.
+  defp initial_phase(_questions, %Session{state: "in_progress"}), do: :prep
+  defp initial_phase(_questions, _session), do: :intro
 
   # Map of `prompt_asset_id => "image" | "pdf" | "video" | …`. Used by
   # `render_attachment` to pick the right element (img / iframe / link).
@@ -260,10 +266,63 @@ defmodule InterviewWeb.CaptureLive do
   end
 
   def handle_event("permission", %{"state" => state} = payload, socket) do
+    # A "denied" permission while we're still in the intro/prep gating
+    # phases routes the candidate to a dedicated screen with browser-
+    # specific re-enable instructions. Once they're recording or past,
+    # denial is a more disruptive event (existing flow handles it via
+    # recorder_error / fence semantics) and we don't override phase
+    # here so we don't yank context out from under an active capture.
+    socket =
+      socket
+      |> assign(:permission_state, state)
+      |> assign(:last_error, payload["error"])
+
+    socket =
+      if state == "denied" and socket.assigns.phase in [:intro, :prep] do
+        assign(socket, :phase, :permission_denied)
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("intro_ready", _params, socket) do
+    # Candidate accepted the disclosure on the intro screen and is
+    # ready to begin. Transition into the standard per-question flow.
+    # The recorder hook mounts here for the first time, so we have to
+    # re-emit the `set_question` and `auth_acked` events that fired
+    # during mount_authenticated — those were pushed before the hook
+    # existed in the DOM and have been lost. LiveView delivers events
+    # pushed inside this handler AFTER the diff lands and the hook
+    # has mounted, so the re-pushes reach the new hook reliably.
+    socket =
+      socket
+      |> assign(:phase, :prep)
+      |> push_set_question()
+
+    socket =
+      if bearer = socket.assigns[:upload_bearer] do
+        push_event(socket, "auth_acked", %{uploadBearer: bearer})
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("permission_denied_retry", _params, socket) do
+    # Drop back into :prep so the standard "Open camera" button is
+    # available; clearing :last_error keeps the previous denial copy
+    # from sticking around if the next request succeeds. We do NOT
+    # auto-fire the permission request here — the candidate clicks
+    # the camera button themselves so the gesture is browser-trusted
+    # (some browsers require a user gesture per request).
     {:noreply,
      socket
-     |> assign(:permission_state, state)
-     |> assign(:last_error, payload["error"])}
+     |> assign(:phase, :prep)
+     |> assign(:permission_state, "idle")
+     |> assign(:last_error, nil)}
   end
 
   def handle_event(
@@ -731,6 +790,10 @@ defmodule InterviewWeb.CaptureLive do
         <div class="flex flex-wrap items-baseline justify-between gap-3">
           <p class="zen-eyebrow">
             <%= cond do %>
+              <% @phase == :intro -> %>
+                § — Welcome
+              <% @phase == :permission_denied -> %>
+                § — Camera access
               <% @phase == :review -> %>
                 § — Review
               <% @phase == :submitted -> %>
@@ -753,6 +816,10 @@ defmodule InterviewWeb.CaptureLive do
       </header>
 
       <%= cond do %>
+        <% @phase == :intro -> %>
+          {render_intro(assigns)}
+        <% @phase == :permission_denied -> %>
+          {render_permission_denied(assigns)}
         <% @phase == :review -> %>
           {render_review(assigns)}
         <% @phase == :submitted -> %>
@@ -778,7 +845,7 @@ defmodule InterviewWeb.CaptureLive do
           <p class="text-sm text-base-content/60">No questions in this template.</p>
       <% end %>
 
-      <%= if @phase not in [:review, :submitted, :fenced] do %>
+      <%= if @phase not in [:intro, :permission_denied, :review, :submitted, :fenced] do %>
         <details class="opacity-50 hover:opacity-100 transition-opacity">
           <summary class="zen-eyebrow text-[10px] cursor-pointer select-none list-none">
             § — Debug
@@ -892,12 +959,16 @@ defmodule InterviewWeb.CaptureLive do
               >
                 ▸
               </span>
-              <span>{if @attachment_expanded, do: "Hide the attachment", else: "Re-view the attachment"}</span>
+              <span>
+                {if @attachment_expanded, do: "Hide the attachment", else: "Re-view the attachment"}
+              </span>
             </button>
           <% end %>
           <div class="section-shutter">
             <div>
-              {render_attachment(assign(assigns, :attachment_id, @current_question.attachment_asset_id))}
+              {render_attachment(
+                assign(assigns, :attachment_id, @current_question.attachment_asset_id)
+              )}
             </div>
           </div>
         </div>
@@ -1052,6 +1123,110 @@ defmodule InterviewWeb.CaptureLive do
     """
   end
 
+  defp render_intro(assigns) do
+    ~H"""
+    <section class="max-w-xl mx-auto space-y-10 py-4">
+      <div class="space-y-5">
+        <h2 class="font-display text-[clamp(1.8rem,4.5vw,2.6rem)] leading-[1.15] tracking-[-0.018em] font-light">
+          A few <em class="italic font-light text-primary">moments</em> before we begin.
+        </h2>
+        <p class="text-[15px] leading-[1.65] text-base-content/80 max-w-[44ch]">
+          You'll be asked a small number of questions, one at a time. After each
+          prompt you'll have a brief think-time, then you record your answer
+          straight into the browser.
+        </p>
+      </div>
+
+      <ul class="space-y-2 text-[14.5px] leading-[1.55] text-base-content/75 max-w-[44ch]">
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">01</span>
+          <span>Make sure you're somewhere quiet with a steady connection.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">02</span>
+          <span>You'll be asked to allow camera and microphone access on the next step.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">03</span>
+          <span>Once you start recording, give the answer in one take.</span>
+        </li>
+      </ul>
+
+      <p class="text-[12.5px] italic leading-[1.6] text-base-content/55 max-w-[44ch] border-l-2 border-base-content/15 pl-4">
+        Your spoken answer will be transcribed and scored by AI against a
+        structured rubric. A human recruiter reviews the score and the
+        recording before any hiring decision.
+      </p>
+
+      <div class="pt-2">
+        <button
+          type="button"
+          phx-click="intro_ready"
+          class="zen-link text-base-content text-[15px]"
+        >
+          <span class="zen-arrow" aria-hidden="true">→</span>
+          <span>I'm ready</span>
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  defp render_permission_denied(assigns) do
+    ~H"""
+    <section class="max-w-xl mx-auto space-y-8 py-4">
+      <div class="space-y-5">
+        <p class="zen-eyebrow opacity-55 text-warning">§ — Camera access</p>
+        <h2 class="font-display text-[clamp(1.8rem,4.5vw,2.6rem)] leading-[1.15] tracking-[-0.018em] font-light">
+          We need <em class="italic font-light text-primary">access</em>
+          to your camera and microphone.
+        </h2>
+        <p class="text-[15px] leading-[1.65] text-base-content/80 max-w-[46ch]">
+          Your browser blocked the request. The interview is recorded by
+          your own device — without camera and microphone permission, we
+          can't capture an answer. Re-enable access in your browser, then
+          try again.
+        </p>
+      </div>
+
+      <details class="text-[13.5px] leading-[1.6] text-base-content/70 max-w-[46ch]">
+        <summary class="cursor-pointer select-none zen-link text-base-content/75 hover:text-base-content inline-flex items-baseline gap-2">
+          <span class="text-[11px]" aria-hidden="true">▸</span>
+          <span>How to re-enable access</span>
+        </summary>
+        <div class="mt-4 space-y-3 pl-4 border-l border-base-content/10">
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Chrome / Edge —</span>
+            click the camera icon at the left edge of the address bar,
+            choose <em class="italic">Allow</em>, then reload.
+          </p>
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Safari —</span>
+            open <em class="italic">Safari → Settings for This Website…</em>
+            and set Camera + Microphone to <em class="italic">Allow</em>.
+          </p>
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Firefox —</span>
+            click the camera icon at the left edge of the address bar and
+            remove the blocked permission, then try again.
+          </p>
+        </div>
+      </details>
+
+      <div class="pt-2">
+        <button
+          type="button"
+          phx-click="permission_denied_retry"
+          class="zen-link text-base-content text-[15px]"
+        >
+          <span class="zen-arrow" aria-hidden="true">↺</span>
+          <span>I've enabled access — try again</span>
+        </button>
+      </div>
+    </section>
+    """
+  end
+
   defp render_recorder(assigns) do
     ~H"""
     <section
@@ -1087,9 +1262,6 @@ defmodule InterviewWeb.CaptureLive do
           <span class="zen-arrow" aria-hidden="true">■</span>
           <span>Stop</span>
         </button>
-        <button data-action="release" class="zen-link text-base-content/55 hover:text-base-content ml-auto">
-          <span>Release camera</span>
-        </button>
       </div>
     </section>
     """
@@ -1102,69 +1274,107 @@ defmodule InterviewWeb.CaptureLive do
 
       <dl class="grid grid-cols-2 gap-x-5 gap-y-3 text-[11px]">
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Session</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@session_id}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Session
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@session_id}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Phase</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Phase
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@phase}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Session state</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Session state
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@session_state}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Permission</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Permission
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@permission_state}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Recorder</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Recorder
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@recorder_state}</dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">MIME</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            MIME
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@mime_type || "—"}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Buffered</dt>
-          <dd class="font-mono text-base-content/85 tabular-nums">{format_bytes(@bytes_buffered_locally)}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Buffered
+          </dt>
+          <dd class="font-mono text-base-content/85 tabular-nums">
+            {format_bytes(@bytes_buffered_locally)}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Uploaded</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Uploaded
+          </dt>
           <dd class="font-mono text-base-content/85 tabular-nums">{format_bytes(@bytes_uploaded)}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Complete</dt>
-          <dd class="font-mono text-base-content/85">{if @capture_complete_acked, do: "yes", else: "no"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Complete
+          </dt>
+          <dd class="font-mono text-base-content/85">
+            {if @capture_complete_acked, do: "yes", else: "no"}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Bitrate step</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Bitrate step
+          </dt>
           <dd class="font-mono text-base-content/85 tabular-nums">{@bitrate_step}</dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Capture instance</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@capture_instance_id || "—"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Capture instance
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@capture_instance_id || "—"}
+          </dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Response id</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@response_id || "—"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Response id
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@response_id || "—"}
+          </dd>
         </div>
 
         <%= if @last_recording_duration_ms do %>
           <div class="col-span-2 space-y-0">
-            <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Last duration</dt>
-            <dd class="font-mono text-base-content/85 tabular-nums">{@last_recording_duration_ms} ms</dd>
+            <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+              Last duration
+            </dt>
+            <dd class="font-mono text-base-content/85 tabular-nums">
+              {@last_recording_duration_ms} ms
+            </dd>
           </div>
         <% end %>
 

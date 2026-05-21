@@ -162,6 +162,128 @@ defmodule InterviewWeb.CaptureLiveTest do
     assert xfo == [], "embed pipeline must strip X-Frame-Options"
   end
 
+  describe "intro / permission-denied gate" do
+    test "fresh (pending) session lands on the intro screen, not the recorder",
+         %{conn: conn} do
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, html} = live(conn, capture_path(session))
+
+      assert html =~ "Welcome"
+      # Apostrophe is HTML-escaped in the rendered output.
+      assert html =~ "I&#39;m ready"
+      assert html =~ "transcribed and scored by AI"
+      refute html =~ "Question 1 of 1"
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :intro
+    end
+
+    test "mid-interview (in_progress) session skips the intro", %{conn: conn} do
+      # An in-progress session means the candidate already accepted the
+      # gate on a prior page-load; bouncing them through it again would
+      # be annoying. Existing graph!/1 default is in_progress.
+      %{session: session} = graph!()
+      {:ok, view, html} = live(conn, capture_path(session))
+
+      assert html =~ "Question 1 of 1"
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :prep
+    end
+
+    test "clicking 'I'm ready' transitions to :prep", %{conn: conn} do
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      view |> element("button", "I'm ready") |> render_click()
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :prep
+      assert render(view) =~ "Question 1 of 1"
+    end
+
+    test "permission denied during :intro routes to :permission_denied", %{conn: conn} do
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      render_hook(view, "permission", %{"state" => "denied"})
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :permission_denied
+      assert render(view) =~ "Camera access"
+      assert render(view) =~ "How to re-enable access"
+    end
+
+    test "permission denied during :prep also routes to :permission_denied",
+         %{conn: conn} do
+      %{session: session} = graph!()
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      render_hook(view, "permission", %{"state" => "denied"})
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :permission_denied
+    end
+
+    test "permission denied during :recording does NOT change phase", %{conn: conn} do
+      # The candidate is mid-take; yanking them out to a denial screen
+      # would discard the in-flight capture. Existing recorder_error
+      # paths handle this case; the gate-screen handler must not.
+      %{session: session} = graph!()
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      render_hook(view, "recorder_started", %{
+        "captureInstanceId" => "cap-test",
+        "mimeType" => "video/webm"
+      })
+
+      assert :sys.get_state(view.pid).socket.assigns.phase == :recording
+      render_hook(view, "permission", %{"state" => "denied"})
+      assert :sys.get_state(view.pid).socket.assigns.phase == :recording
+    end
+
+    test "permission_denied_retry returns to :prep + resets permission_state",
+         %{conn: conn} do
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      # Walk: :intro → click I'm ready → :prep → deny → :permission_denied → retry → :prep.
+      view |> element("button", "I'm ready") |> render_click()
+      render_hook(view, "permission", %{"state" => "denied"})
+      assert :sys.get_state(view.pid).socket.assigns.phase == :permission_denied
+
+      view |> element("button", "try again") |> render_click()
+
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.phase == :prep
+      assert state.socket.assigns.permission_state == "idle"
+      assert is_nil(state.socket.assigns.last_error)
+    end
+
+    test "Release camera button is not in the recorder UI", %{conn: conn} do
+      %{session: session} = graph!()
+      {:ok, _view, html} = live(conn, capture_path(session))
+
+      refute html =~ "Release camera"
+      refute html =~ ~s|data-action="release"|
+    end
+
+    test "intro_ready re-pushes set_question + auth_acked for the just-mounted hook",
+         %{conn: conn} do
+      # mount_authenticated pushes both events on initial mount, but the
+      # recorder hook isn't in the DOM yet during :intro. When the
+      # candidate clicks I'm ready, the LV must re-push so the freshly-
+      # mounted hook has question metadata + upload bearer.
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      view |> element("button", "I'm ready") |> render_click()
+
+      assert_push_event(view, "set_question", %{questionIndex: _, maxAnswerSeconds: _})
+      assert_push_event(view, "auth_acked", %{uploadBearer: bearer})
+      assert is_binary(bearer)
+    end
+  end
+
   describe "multi-question iteration" do
     setup do
       %{session: session, version: version, questions: [q1, q2, q3]} =

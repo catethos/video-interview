@@ -38,7 +38,9 @@ const Recorder = {
     });
     this.bind("start", () => this.startRecording());
     this.bind("stop", () => this.stopRecording());
-    this.bind("release", () => this.releaseCamera());
+    // Note: no `release` binding — candidates can't choose to drop the
+    // camera mid-interview. The hook still owns `releaseCamera()` for
+    // unmount cleanup (see destroyed() → core.destroy()).
 
     this.handleEvent("set_question", (payload) => this.applyQuestion(payload));
     this.handleEvent("auth_acked", (payload) => {
