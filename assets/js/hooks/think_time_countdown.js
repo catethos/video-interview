@@ -21,6 +21,11 @@
 
 const SPELL = ["", "one", "two", "three", "four", "five"];
 
+// Number of seconds at the END of think-time where the cinematic
+// 3-2-1 overlay flashes on the camera preview. Matches the post-
+// thinktime auto-start window's last-3-seconds cinematic (Pass B).
+const CINEMATIC_LAST_SECONDS = 3;
+
 const ThinkTimeCountdown = {
   mounted() {
     const total = Number.parseInt(this.el.dataset.thinkSeconds || "0", 10);
@@ -33,6 +38,7 @@ const ThinkTimeCountdown = {
 
   destroyed() {
     this.clear();
+    this.clearCinematic();
   },
 
   clear() {
@@ -62,10 +68,14 @@ const ThinkTimeCountdown = {
   //   - done:    "Ready when you are."
   // Last 5 seconds use spelled-out numerals to match the editorial
   // aesthetic — "five." beats "5" at this typographic scale.
+  // Last 3 seconds ALSO flash a cinematic numeral on the camera
+  // preview (the [data-role="cinematic-countdown"] span the LV
+  // template renders inside the preview frame).
   render() {
     if (this.remaining <= 0) {
       this.el.textContent = "Ready when you are.";
       this.el.classList.add("think-time-done");
+      this.clearCinematic();
       return;
     }
     if (this.remaining <= 5) {
@@ -73,6 +83,31 @@ const ThinkTimeCountdown = {
     } else {
       this.el.textContent = `Recording begins in ${this.remaining} seconds.`;
     }
+    if (this.remaining <= CINEMATIC_LAST_SECONDS) {
+      this.renderCinematic(this.remaining);
+    }
+  },
+
+  // Update the cinematic-overlay span inside the preview frame.
+  // We retrigger the CSS animation by toggling the class off then on
+  // — assignment alone won't re-fire the animation on a re-applied
+  // class. Force a reflow between the removeClass and addClass.
+  renderCinematic(n) {
+    const el = document.querySelector('[data-role="cinematic-countdown"]');
+    if (!el) return;
+    el.textContent = String(n);
+    el.classList.remove("cinematic-countdown-tick");
+    // Force reflow to retrigger the animation; reading offsetWidth is
+    // the standard browser-API way to force a synchronous layout.
+    void el.offsetWidth;
+    el.classList.add("cinematic-countdown-tick");
+  },
+
+  clearCinematic() {
+    const el = document.querySelector('[data-role="cinematic-countdown"]');
+    if (!el) return;
+    el.textContent = "";
+    el.classList.remove("cinematic-countdown-tick");
   },
 };
 

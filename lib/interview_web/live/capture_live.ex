@@ -1309,6 +1309,12 @@ defmodule InterviewWeb.CaptureLive do
             aria-hidden="true"
           >
           </span>
+          <span
+            data-role="cinematic-countdown"
+            class="absolute inset-0 flex items-center justify-center font-display italic text-white/55 cinematic-countdown pointer-events-none"
+            aria-hidden="true"
+          >
+          </span>
         </div>
       </div>
 
