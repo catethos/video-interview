@@ -76,8 +76,17 @@ defmodule Interview.ExternalIntegration.ScoringExport do
     end
   end
 
+  # Two final states per question:
+  #   * `selected_response: nil`  → the candidate skipped or never answered.
+  #     The question is final, just empty. Treat as ready.
+  #   * `selected_response: %Response{transcript_ready_at: t}` with t != nil
+  #     → the answer's Whisper transcript landed. Ready.
+  # Any other shape (an existing response whose transcript hasn't landed
+  # yet) means we're racing the async transcription job; report not_ready
+  # so the caller retries.
   defp transcripts_ready?(question_cards) do
     Enum.all?(question_cards, fn
+      %{selected_response: nil} -> true
       %{selected_response: %{transcript_ready_at: t}} when not is_nil(t) -> true
       _ -> false
     end)

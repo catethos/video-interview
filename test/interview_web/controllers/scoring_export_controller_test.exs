@@ -27,13 +27,16 @@ defmodule InterviewWeb.ScoringExportControllerTest do
         completed_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
       })
 
+    now = DateTime.utc_now()
+
     {:ok, r1} =
       %Response{
         session_id: session.id,
         template_question_id: q1.id,
         attempt_number: 1,
         state: "ready",
-        transcript_text: "There was one time at Everdy Insurance when I…"
+        transcript_text: "There was one time at Everdy Insurance when I…",
+        transcript_ready_at: now
       }
       |> Repo.insert()
 
@@ -43,7 +46,8 @@ defmodule InterviewWeb.ScoringExportControllerTest do
         template_question_id: q2.id,
         attempt_number: 1,
         state: "ready",
-        transcript_text: "I would start by listening to the stakeholder…"
+        transcript_text: "I would start by listening to the stakeholder…",
+        transcript_ready_at: now
       }
       |> Repo.insert()
 
@@ -105,17 +109,17 @@ defmodule InterviewWeb.ScoringExportControllerTest do
       transcript = payload["interview_transcript"]
       assert length(transcript) == 2
 
-      assert Enum.at(transcript, 0) == %{
-               "question_number" => 1,
-               "question_text" => q1.prompt_text,
-               "answer_text" => r1.transcript_text
-             }
+      entry1 = Enum.at(transcript, 0)
+      assert entry1["question_number"] == 1
+      assert entry1["question_text"] == q1.prompt_text
+      assert entry1["answer_text"] == r1.transcript_text
+      assert entry1["response_id"] == r1.id
 
-      assert Enum.at(transcript, 1) == %{
-               "question_number" => 2,
-               "question_text" => q2.prompt_text,
-               "answer_text" => r2.transcript_text
-             }
+      entry2 = Enum.at(transcript, 1)
+      assert entry2["question_number"] == 2
+      assert entry2["question_text"] == q2.prompt_text
+      assert entry2["answer_text"] == r2.transcript_text
+      assert entry2["response_id"] == r2.id
     end
 
     test "answer_text is null when no response was selected for a question", %{
