@@ -197,6 +197,57 @@ defmodule InterviewWeb.CaptureLiveTest do
     assert xfo == [], "embed pipeline must strip X-Frame-Options"
   end
 
+  describe "disconnected mount (Iron Law fix)" do
+    test "disconnected HTTP mount renders a Connecting shell, not the full UI",
+         %{conn: conn} do
+      # The initial HTTP GET should NOT run ensure_session_questions or
+      # any of the heavier DB work. We verify by asserting the rendered
+      # HTML is the Connecting shell, not the intro/question UI.
+      %{session: session} = graph!()
+      conn = get(conn, capture_path(session))
+      body = html_response(conn, 200)
+
+      assert body =~ "Connecting"
+      assert body =~ "Establishing a secure connection"
+      refute body =~ "Welcome"
+      refute body =~ "Question 1 of 1"
+      # The recorder hook shouldn't be present on this disconnected
+      # response — the WebSocket isn't open yet and we don't want a
+      # mount/destroy cycle for nothing.
+      refute body =~ ~s|phx-hook="Recorder"|
+    end
+
+    test "disconnected mount with a bogus token still surfaces rejection", %{conn: conn} do
+      # The cheap auth peek runs on disconnected so the candidate sees
+      # the rejected state on first paint, not a Connecting→Rejected
+      # flash. Verify by hitting a session with a consumed token.
+      %{session: session} = graph!()
+      token = bootstrap_token!(session)
+      assert {:ok, _} = Bootstrap.consume(token)
+
+      conn = get(conn, ~p"/capture/#{session.id}?token=#{token}")
+      body = html_response(conn, 200)
+
+      assert body =~ "Session unavailable"
+      refute body =~ "Connecting"
+    end
+
+    test "connected mount runs the full DB setup and surfaces the intro",
+         %{conn: conn} do
+      # The LiveViewTest live/2 helper runs both mounts; the connected
+      # mount is what populates assigns from the DB. Verify by checking
+      # final HTML reflects the fully-loaded state.
+      %{session: session} = graph!()
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      # Final connected HTML should be the intro (fresh session) — not
+      # the Connecting shell, which only the disconnected pass renders.
+      html = render(view)
+      assert html =~ "Welcome"
+      refute html =~ "Connecting"
+    end
+  end
+
   describe "intro / permission-denied gate" do
     test "fresh (pending) session lands on the intro screen, not the recorder",
          %{conn: conn} do

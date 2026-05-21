@@ -23,18 +23,69 @@ defmodule InterviewWeb.CaptureLive do
   def mount(%{"session_id" => session_id} = params, _session, socket) do
     socket = assign(socket, :session_id, session_id)
 
-    case authenticate(params, session_id, connected?(socket)) do
+    # LiveView mounts twice: HTTP "disconnected" → renders initial HTML,
+    # then WebSocket "connected" → re-runs mount, switches to live updates.
+    # The disconnected mount must be cheap and read-only — anything slow
+    # delays first paint; any DB write commits even if the browser closes.
+    # So on disconnected, only do the cheap `authenticate` peek (token
+    # validity check) and render either an early-rejection screen OR a
+    # minimal "Connecting…" shell. The full DB work (session questions,
+    # template version, prompt asset kinds, upload bearer mint, audit
+    # log) happens only on the connected mount.
+    if connected?(socket) do
+      mount_connected(socket, session_id, params)
+    else
+      mount_disconnected(socket, session_id, params)
+    end
+  end
+
+  defp mount_connected(socket, session_id, params) do
+    case authenticate(params, session_id, true) do
       {:ok, %Session{} = session} ->
-        {:ok, mount_authenticated(socket, session, connected?(socket))}
+        {:ok, mount_authenticated(socket, session, true)}
 
       :awaiting_auth ->
         {:ok, mount_awaiting_auth(socket, session_id)}
 
       :not_found ->
-        # Render in-place rather than push_navigate to "/": the home page is
-        # on the :browser pipeline and ships X-Frame-Options: DENY, so an
-        # iframe redirected there is blocked. Staying on :embed keeps the
-        # frame-ancestors CSP that lets the parent display this response.
+        {:ok, assign(socket, :not_found, true) |> assign(:rejected, false)}
+
+      {:rejected, reason} ->
+        {:ok,
+         socket
+         |> assign(:not_found, false)
+         |> assign(:rejected, true)
+         |> assign(:rejected_reason, reason)}
+    end
+  end
+
+  defp mount_disconnected(socket, session_id, params) do
+    # Peek (read-only, single small query) to catch the obvious failure
+    # modes — token missing / not_found / rejected — at first-paint time
+    # so the candidate doesn't see a "Connecting…" flash followed by
+    # "Session unavailable". The peek does NOT do the expensive setup
+    # (session_questions, asset kinds, bearer); that waits for connect.
+    case authenticate(params, session_id, false) do
+      {:ok, %Session{}} ->
+        # Cheap shell: the connected mount will re-render with the full
+        # authenticated state in ~50-150ms. Skipping the DB-heavy setup
+        # avoids the Iron Law violation (no INSERTs on disconnected mount,
+        # no four-round-trip latency before first paint).
+        {:ok,
+         socket
+         |> assign(:not_found, false)
+         |> assign(:rejected, false)
+         |> assign(:phase, :connecting)
+         |> assign(:session_id, session_id)}
+
+      :awaiting_auth ->
+        {:ok, mount_awaiting_auth(socket, session_id)}
+
+      :not_found ->
+        # Render in-place rather than push_navigate to "/": the home page
+        # is on the :browser pipeline and ships X-Frame-Options: DENY, so
+        # an iframe redirected there is blocked. Staying on :embed keeps
+        # the frame-ancestors CSP that lets the parent display this response.
         {:ok, assign(socket, :not_found, true) |> assign(:rejected, false)}
 
       {:rejected, reason} ->
@@ -818,6 +869,26 @@ defmodule InterviewWeb.CaptureLive do
     >
       <h1 class="text-xl font-semibold">Loading…</h1>
       <p class="text-sm opacity-70">Waiting for the host to authorise this session.</p>
+    </div>
+    """
+  end
+
+  def render(%{phase: :connecting} = assigns) do
+    # Disconnected (initial HTTP) mount: render a minimal "Connecting…"
+    # shell with no recorder hook, no DB-backed UI. The connected
+    # mount fires within ~100ms and re-renders the real authenticated
+    # state. Without this branch we'd be triggering ensure_session_questions
+    # (an INSERT!) on every page hit before the candidate has even
+    # established their WebSocket — see Iron Law fix in the candidate-
+    # ux-overhaul history.
+    ~H"""
+    <div class="mx-auto max-w-3xl py-12 px-6 space-y-3">
+      <h1 class="font-display italic text-[1.6rem] text-base-content/85">
+        Connecting…
+      </h1>
+      <p class="text-sm text-base-content/55 max-w-[40ch]">
+        Establishing a secure connection to your interview.
+      </p>
     </div>
     """
   end
