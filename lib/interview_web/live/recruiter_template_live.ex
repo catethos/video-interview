@@ -123,15 +123,21 @@ defmodule InterviewWeb.RecruiterTemplateLive do
     end
   end
 
-  def handle_event("update_retake", %{"field" => field, "value" => value}, socket) do
+  # The select fires `phx-change` (a FORM event), which silently
+  # ignores `phx-value-*` attributes — only the named form fields
+  # reach this handler. The number input fires `phx-blur` (NOT a
+  # form event), so its `phx-value-field` did get through. Rather
+  # than maintain two param shapes, accept whatever named keys arrive
+  # and merge them into retake_policy a piece at a time. Each field
+  # write is independent — partial params won't clobber the other.
+  def handle_event("update_retake", params, socket) do
     draft = socket.assigns.draft
     rp = draft.retake_policy || %{}
 
     new_rp =
-      case field do
-        "max_attempts" -> Map.put(rp, "max_attempts", parse_int(value))
-        "mode" -> Map.put(rp, "mode", value)
-      end
+      rp
+      |> maybe_set_retake("max_attempts", parse_int_or_nil(params["max_attempts"]))
+      |> maybe_set_retake("mode", params["mode"])
 
     case Templates.update_draft_version(draft, %{retake_policy: new_rp}) do
       {:ok, updated} ->
@@ -144,6 +150,22 @@ defmodule InterviewWeb.RecruiterTemplateLive do
         {:noreply, put_flash(socket, :error, "Failed to update retake policy")}
     end
   end
+
+  defp maybe_set_retake(map, _key, nil), do: map
+  defp maybe_set_retake(map, key, value), do: Map.put(map, key, value)
+
+  defp parse_int_or_nil(nil), do: nil
+  defp parse_int_or_nil(""), do: nil
+
+  defp parse_int_or_nil(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_int_or_nil(n) when is_integer(n), do: n
+  defp parse_int_or_nil(_), do: nil
 
   def handle_event("add_question", _params, socket) do
     questions = socket.assigns.questions
@@ -581,8 +603,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
                     min="1"
                     value={@draft.retake_policy["max_attempts"]}
                     phx-blur="update_retake"
-                    phx-value-field="max_attempts"
-                    name="value"
+                    name="max_attempts"
                     class="input input-sm w-full"
                   />
                 </label>
@@ -590,8 +611,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
                   <span class="zen-eyebrow opacity-65">Mode</span>
                   <select
                     phx-change="update_retake"
-                    phx-value-field="mode"
-                    name="value"
+                    name="mode"
                     class="select select-sm w-full"
                   >
                     <option value="first_only" selected={@draft.retake_policy["mode"] == "first_only"}>

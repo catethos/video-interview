@@ -49,6 +49,28 @@ defmodule InterviewWeb.RecruiterTemplateLiveTest do
     assert reloaded.prompt_text == "Edited prompt"
   end
 
+  test "update_retake persists the mode selection (regression)",
+       %{conn: conn, template: template} do
+    # Reported by live test: recruiter selected 'last' mode in the
+    # select on the editor, but DB still showed 'first_only'. Repro
+    # by triggering phx-change the way the browser would — element-
+    # targeted so the form-field collection logic runs.
+    {:ok, view, _html} = live(conn, ~p"/recruiter/templates/#{template.id}")
+
+    %{draft_version: draft} = Templates.get_template_with_current_version(template.id)
+    assert draft
+    assert draft.retake_policy["mode"] == "first_only"
+
+    view
+    |> element(~s|select[phx-change="update_retake"][name="mode"]|)
+    |> render_change(%{mode: "last"})
+
+    reloaded = Interview.Repo.get!(Interview.Templates.Version, draft.id)
+
+    assert reloaded.retake_policy["mode"] == "last",
+           "expected mode 'last' to persist, got: #{inspect(reloaded.retake_policy)}"
+  end
+
   test "reorder via move event persists", %{conn: conn, template: template} do
     {:ok, view, _html} = live(conn, ~p"/recruiter/templates/#{template.id}")
     %{draft_version: draft} = Templates.get_template_with_current_version(template.id)
