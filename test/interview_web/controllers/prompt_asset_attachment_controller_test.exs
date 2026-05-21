@@ -17,11 +17,7 @@ defmodule InterviewWeb.PromptAssetAttachmentControllerTest do
     conn = Plug.Test.init_test_session(conn, %{recruiter_token: token})
 
     {:ok,
-     conn: conn,
-     tenant: tenant,
-     recruiter: recruiter,
-     template: template,
-     question: question}
+     conn: conn, tenant: tenant, recruiter: recruiter, template: template, question: question}
   end
 
   defp tmp_png! do

@@ -58,8 +58,11 @@ defmodule Interview.WebhooksTest do
       tenant = configured_tenant!()
       session = session_for(tenant)
 
-      {:ok, %Delivery{id: id, delivered_at: stamp}} = Webhooks.enqueue(session, "session.submitted")
-      {:ok, %Delivery{id: ^id, delivered_at: ^stamp}} = Webhooks.enqueue(session, "session.submitted")
+      {:ok, %Delivery{id: id, delivered_at: stamp}} =
+        Webhooks.enqueue(session, "session.submitted")
+
+      {:ok, %Delivery{id: ^id, delivered_at: ^stamp}} =
+        Webhooks.enqueue(session, "session.submitted")
 
       assert Repo.aggregate(Delivery, :count, :id) == 1
     end
@@ -331,7 +334,13 @@ defmodule Interview.WebhooksTest do
   describe "circuit breaker" do
     setup do
       prev = Application.get_env(:interview, Interview.Webhooks, [])
-      Application.put_env(:interview, Interview.Webhooks, Keyword.put(prev, :circuit_breaker_threshold, 3))
+
+      Application.put_env(
+        :interview,
+        Interview.Webhooks,
+        Keyword.put(prev, :circuit_breaker_threshold, 3)
+      )
+
       on_exit(fn -> Application.put_env(:interview, Interview.Webhooks, prev) end)
       :ok
     end

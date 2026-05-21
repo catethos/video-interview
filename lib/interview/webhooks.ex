@@ -53,7 +53,12 @@ defmodule Interview.Webhooks do
   In that case the row stays in `pending` and no job is enqueued.
   """
   def enqueue(%Session{} = session, event_type, data \\ %{})
-      when event_type in ["session.submitted", "session.ready", "session.failed", "session.deleted"] do
+      when event_type in [
+             "session.submitted",
+             "session.ready",
+             "session.failed",
+             "session.deleted"
+           ] do
     case Repo.get(Tenant, session.tenant_id) do
       nil ->
         {:error, :tenant_not_found}
@@ -217,8 +222,11 @@ defmodule Interview.Webhooks do
   The receiver sees a payload with `"type": "webhook.test"` so it can
   distinguish from real session events.
   """
-  def send_test_event(%Tenant{webhook_url: url}) when url in [nil, ""], do: {:error, :not_configured}
-  def send_test_event(%Tenant{webhook_secret: secret}) when secret in [nil, ""], do: {:error, :missing_secret}
+  def send_test_event(%Tenant{webhook_url: url}) when url in [nil, ""],
+    do: {:error, :not_configured}
+
+  def send_test_event(%Tenant{webhook_secret: secret}) when secret in [nil, ""],
+    do: {:error, :missing_secret}
 
   def send_test_event(%Tenant{} = tenant) do
     now = DateTime.to_iso8601(DateTime.utc_now())

@@ -42,7 +42,10 @@ defmodule Interview.Transcode do
   """
   def transcode(src) when is_binary(src) do
     dst =
-      Path.join(System.tmp_dir!(), "interview_transcode_#{System.unique_integer([:positive])}.mp4")
+      Path.join(
+        System.tmp_dir!(),
+        "interview_transcode_#{System.unique_integer([:positive])}.mp4"
+      )
 
     args = Enum.map(@ffmpeg_args, &substitute(&1, src, dst))
     nice = System.find_executable("nice")

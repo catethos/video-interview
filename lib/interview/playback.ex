@@ -210,8 +210,7 @@ defmodule Interview.Playback do
     from(r in Response,
       join: s in Session,
       on: s.id == r.session_id,
-      where:
-        r.id == ^response_id and s.tenant_id == ^tenant_id and is_nil(s.deleted_at),
+      where: r.id == ^response_id and s.tenant_id == ^tenant_id and is_nil(s.deleted_at),
       select: r
     )
     |> Repo.one()

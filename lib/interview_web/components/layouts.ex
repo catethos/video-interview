@@ -51,7 +51,8 @@ defmodule InterviewWeb.Layouts do
             <.nav_link navigate={~p"/recruiter/sessions"}>Sessions</.nav_link>
             <.nav_link navigate={~p"/recruiter/templates"}>Templates</.nav_link>
             <.nav_link navigate={~p"/recruiter/docs"}>Tutorial</.nav_link>
-            <span class="hidden md:inline-block mx-3 h-3 w-px bg-base-content/15" aria-hidden="true"></span>
+            <span class="hidden md:inline-block mx-3 h-3 w-px bg-base-content/15" aria-hidden="true">
+            </span>
             <span class="zen-eyebrow hidden md:inline-block normal-case tracking-[0.08em] text-[10.5px] truncate max-w-[14rem]">
               {@current_scope.recruiter.email}
             </span>

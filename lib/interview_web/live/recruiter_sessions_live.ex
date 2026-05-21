@@ -49,7 +49,10 @@ defmodule InterviewWeb.RecruiterSessionsLive do
      # Filter change can drop rows the user had selected — keep only the
      # ids that are still visible to avoid silently deleting rows the
      # user can't see.
-     |> assign(:selected_ids, MapSet.intersection(socket.assigns.selected_ids, MapSet.new(visible_ids)))
+     |> assign(
+       :selected_ids,
+       MapSet.intersection(socket.assigns.selected_ids, MapSet.new(visible_ids))
+     )
      |> assign(:sessions, rows)
      |> assign(:empty?, rows == [])}
   end
@@ -86,7 +89,9 @@ defmodule InterviewWeb.RecruiterSessionsLive do
 
   def handle_event("toggle_select_all", _params, socket) do
     visible = MapSet.new(socket.assigns.visible_ids)
-    all_selected? = MapSet.subset?(visible, socket.assigns.selected_ids) and MapSet.size(visible) > 0
+
+    all_selected? =
+      MapSet.subset?(visible, socket.assigns.selected_ids) and MapSet.size(visible) > 0
 
     {:noreply, assign(socket, :selected_ids, if(all_selected?, do: MapSet.new(), else: visible))}
   end

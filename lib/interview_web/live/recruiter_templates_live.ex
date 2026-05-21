@@ -19,7 +19,9 @@ defmodule InterviewWeb.RecruiterTemplatesLive do
 
     rows =
       Enum.map(templates, fn template ->
-        current = template.current_version_id && Templates.get_version(template.current_version_id)
+        current =
+          template.current_version_id && Templates.get_version(template.current_version_id)
+
         versions = Templates.list_versions(template.id)
 
         %{

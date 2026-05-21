@@ -258,7 +258,10 @@ defmodule InterviewWeb.RecruiterSettingsLive do
   end
 
   defp short(nil), do: "—"
-  defp short(uuid) when is_binary(uuid) and byte_size(uuid) >= 8, do: binary_part(uuid, 0, 8) <> "…"
+
+  defp short(uuid) when is_binary(uuid) and byte_size(uuid) >= 8,
+    do: binary_part(uuid, 0, 8) <> "…"
+
   defp short(_), do: "—"
 
   defp state_badge_class("delivered"), do: "badge-success"

@@ -40,9 +40,7 @@ defmodule Interview.Workers.PromptAssetFinalizer do
 
       %PromptAsset{state: state}
       when state in ["ready", "failed", "abandoned"] ->
-        Logger.info(
-          "prompt_asset_finalizer: #{asset_id} already terminal (#{state}); skipping"
-        )
+        Logger.info("prompt_asset_finalizer: #{asset_id} already terminal (#{state}); skipping")
 
         :ok
 

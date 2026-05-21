@@ -161,11 +161,9 @@ defmodule InterviewWeb.RecruiterSessionLive do
               >
               </video>
               <p class="text-xs opacity-70">
-                Duration {format_duration(card.selected_response.duration_ms)}
-                · attempt {card.selected_response.attempt_number} of {length(
+                Duration {format_duration(card.selected_response.duration_ms)} · attempt {card.selected_response.attempt_number} of {length(
                   card.attempts
-                )}
-                · state {card.selected_response.state}
+                )} · state {card.selected_response.state}
               </p>
 
               <div
@@ -187,9 +185,7 @@ defmodule InterviewWeb.RecruiterSessionLive do
                       else: "Show transcript"}
                 </button>
                 <p
-                  :if={
-                    MapSet.member?(@expanded_transcripts, card.template_question.id)
-                  }
+                  :if={MapSet.member?(@expanded_transcripts, card.template_question.id)}
                   class="mt-1 whitespace-pre-line opacity-90 border-l-2 border-base-300 pl-3"
                 >
                   {card.selected_response.transcript_text}
@@ -222,9 +218,8 @@ defmodule InterviewWeb.RecruiterSessionLive do
                       "font-semibold"
                   }
                 >
-                  attempt={r.attempt_number} state={r.state}
-                  duration={format_duration(r.duration_ms)}
-                  storage_key={r.storage_key || "—"}
+                  attempt={r.attempt_number} state={r.state} duration={format_duration(r.duration_ms)} storage_key={r.storage_key ||
+                    "—"}
                 </li>
               </ul>
             </li>
