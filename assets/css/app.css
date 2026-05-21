@@ -463,28 +463,29 @@ body > * { position: relative; z-index: 1; }
   padding-bottom: 0;
 }
 
-/* Recorder button visibility is gated by the surrounding wrapper's
- * data-phase. The recorder section itself uses phx-update="ignore"
- * so its children can't change per phase; we use CSS on the wrapper
- * (which IS updated by LV) to show/hide.
+/* Recorder button visibility on the CANDIDATE side. Scoped to the
+ * [data-camera-state] wrapper that only the candidate's CaptureLive
+ * renders — the recruiter prompt-recorder uses the same data-action
+ * attributes but no data-camera-state, so its Record/Stop buttons
+ * are not affected by these rules.
  *
- * Visibility matrix:
+ * Visibility matrix (candidate only):
  *   data-action="request" (Open camera) → any phase, hidden once
  *                                          data-camera-state="on"
- *                                          (see rule below)
+ *                                          (see rule further below)
  *   data-action="start"   (Record)      → :prep only
  *   data-action="stop"    (Stop)        → :recording only
  *
- * Default: hide. Per-phase rules below opt in.
+ * Default within the candidate wrapper: hide. Per-phase rules opt in.
  */
-[data-action="start"],
-[data-action="stop"] {
+[data-camera-state] [data-action="start"],
+[data-camera-state] [data-action="stop"] {
   display: none;
 }
-[data-phase="prep"] [data-action="start"] {
+[data-camera-state][data-phase="prep"] [data-action="start"] {
   display: inline-flex;
 }
-[data-phase="recording"] [data-action="stop"] {
+[data-camera-state][data-phase="recording"] [data-action="stop"] {
   display: inline-flex;
 }
 
