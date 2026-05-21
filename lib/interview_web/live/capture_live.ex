@@ -989,6 +989,19 @@ defmodule InterviewWeb.CaptureLive do
         <% end %>
         <span>{if @current_question.required, do: "Required", else: "Optional"}</span>
       </p>
+
+      <%= if @phase == :prep and @current_question.think_time_seconds && @current_question.think_time_seconds > 0 do %>
+        <p class="font-display italic text-[14.5px] leading-[1.6] text-base-content/70 max-w-[44ch] think-time-phrase">
+          <span
+            id={"think-time-#{@current_index}-#{@current_question.id}"}
+            phx-hook="ThinkTimeCountdown"
+            phx-update="ignore"
+            data-think-seconds={@current_question.think_time_seconds}
+          >
+            Recording begins in {@current_question.think_time_seconds} seconds.
+          </span>
+        </p>
+      <% end %>
     </section>
     """
   end
@@ -1237,7 +1250,7 @@ defmodule InterviewWeb.CaptureLive do
       class="space-y-5 min-w-0"
     >
       <div class="preview-shutter">
-        <div>
+        <div class="relative">
           <video
             data-role="preview"
             autoplay
@@ -1246,6 +1259,12 @@ defmodule InterviewWeb.CaptureLive do
             class="w-full aspect-video rounded-sm bg-black/95"
           >
           </video>
+          <span
+            data-role="recording-countdown"
+            class="absolute bottom-3 right-3 font-display italic text-base text-white/85 tracking-tight recording-countdown"
+            aria-hidden="true"
+          >
+          </span>
         </div>
       </div>
 

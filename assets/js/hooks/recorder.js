@@ -27,6 +27,8 @@ const Recorder = {
     };
 
     this.preview = this.el.querySelector('video[data-role="preview"]');
+    this.countdownEl = this.el.querySelector('[data-role="recording-countdown"]');
+    this.countdownTimer = null;
     this.bind("request", () => {
       // Optimistic LV ping so the UI can react the instant the candidate
       // commits — getUserMedia + the browser permission dialog can take
@@ -81,6 +83,7 @@ const Recorder = {
   destroyed() {
     if (this.onMessage) window.removeEventListener("message", this.onMessage);
     if (this.core) this.core.destroy();
+    this.stopRecordingCountdown();
   },
 
   // --- Core event bridge ----------------------------------------------
@@ -99,11 +102,13 @@ const Recorder = {
       }
 
       case "recorder_started":
+        this.startRecordingCountdown();
         this.pushEvent("recorder_started", payload);
         this.postToParent({ type: "recording_started", position: this.state.questionIndex });
         break;
 
       case "recorder_stopped":
+        this.stopRecordingCountdown();
         this.setActionDisabled("start", false);
         this.pushEvent("recorder_stopped", payload);
         this.postToParent({
@@ -305,6 +310,65 @@ const Recorder = {
         }
       });
     });
+  },
+
+  // --- Recording-time countdown overlay -------------------------------
+  //
+  // Lives inside this hook (rather than a sibling hook) because the
+  // surrounding section uses phx-update="ignore" — a separate hook on
+  // a sibling can't track data-phase reliably across diffs. The
+  // authoritative auto-stop is in core.js's _armAutoStop; this widget
+  // is just the visible mirror, updating once per second.
+
+  startRecordingCountdown() {
+    if (!this.countdownEl) return;
+    const max = this.state.maxAnswerSeconds;
+    if (!Number.isInteger(max) || max <= 0) return;
+
+    this.countdownElapsed = 0;
+    this.renderRecordingCountdown();
+    this.countdownTimer = setInterval(() => this.tickRecordingCountdown(), 1000);
+  },
+
+  stopRecordingCountdown() {
+    if (this.countdownTimer) {
+      clearInterval(this.countdownTimer);
+      this.countdownTimer = null;
+    }
+    if (this.countdownEl) {
+      this.countdownEl.textContent = "";
+      this.countdownEl.classList.remove(
+        "recording-countdown-receding",
+        "recording-countdown-warning",
+      );
+    }
+  },
+
+  tickRecordingCountdown() {
+    const max = this.state.maxAnswerSeconds;
+    if (!Number.isInteger(max) || max <= 0) return;
+    this.countdownElapsed += 1;
+    if (this.countdownElapsed >= max) {
+      // Authoritative stop fires in core.js; clamp the visible value.
+      this.countdownElapsed = max;
+      this.renderRecordingCountdown();
+      return;
+    }
+    this.renderRecordingCountdown();
+  },
+
+  renderRecordingCountdown() {
+    if (!this.countdownEl) return;
+    const max = this.state.maxAnswerSeconds;
+    const remaining = Math.max(0, max - this.countdownElapsed);
+
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    this.countdownEl.textContent =
+      `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+
+    this.countdownEl.classList.toggle("recording-countdown-receding", remaining <= 15);
+    this.countdownEl.classList.toggle("recording-countdown-warning", remaining <= 5);
   },
 };
 

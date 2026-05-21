@@ -284,6 +284,38 @@ defmodule InterviewWeb.CaptureLiveTest do
     end
   end
 
+  describe "think-time + recording countdowns" do
+    test "renders the think-time phrase when the question has think_time_seconds",
+         %{conn: conn} do
+      %{session: session} = graph!(%{question: %{think_time_seconds: 30}})
+      {:ok, _view, html} = live(conn, capture_path(session))
+
+      assert html =~ ~s|phx-hook="ThinkTimeCountdown"|
+      assert html =~ ~s|data-think-seconds="30"|
+      assert html =~ "Recording begins in 30 seconds."
+    end
+
+    test "does NOT render the think-time phrase when think_time_seconds is nil/0",
+         %{conn: conn} do
+      %{session: session} = graph!(%{question: %{think_time_seconds: 0}})
+      {:ok, _view, html} = live(conn, capture_path(session))
+
+      refute html =~ ~s|phx-hook="ThinkTimeCountdown"|
+      refute html =~ "Recording begins in"
+    end
+
+    test "renders the recording-countdown overlay element inside the preview frame",
+         %{conn: conn} do
+      %{session: session} = graph!(%{question: %{max_answer_seconds: 90}})
+      {:ok, _view, html} = live(conn, capture_path(session))
+
+      assert html =~ ~s|data-role="recording-countdown"|
+      # `recording-countdown` is one of multiple class names on the
+      # span; just confirm the marker class is present.
+      assert html =~ "recording-countdown"
+    end
+  end
+
   describe "multi-question iteration" do
     setup do
       %{session: session, version: version, questions: [q1, q2, q3]} =
