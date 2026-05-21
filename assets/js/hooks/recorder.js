@@ -125,6 +125,7 @@ const Recorder = {
         // Notify other hooks (e.g. ThinkTimeCountdown's idle timer)
         // so they can cancel any pending auto-start logic.
         document.dispatchEvent(new CustomEvent("candidate:recorder-started"));
+        this._announce("Recording started.");
         this.postToParent({ type: "recording_started", position: this.state.questionIndex });
         break;
 
@@ -132,6 +133,7 @@ const Recorder = {
         this.stopRecordingCountdown();
         this.setActionDisabled("start", false);
         this.pushEvent("recorder_stopped", payload);
+        this._announce("Recording stopped.");
         this.postToParent({
           type: "recording_stopped",
           position: this.state.questionIndex,
@@ -390,6 +392,30 @@ const Recorder = {
 
     this.countdownEl.classList.toggle("recording-countdown-receding", remaining <= 15);
     this.countdownEl.classList.toggle("recording-countdown-warning", remaining <= 5);
+
+    // Throttled aria-live cues for screen-reader users. Spamming every
+    // second is unusable; we milestone-announce instead.
+    if (
+      remaining === 60 ||
+      remaining === 30 ||
+      remaining === 15 ||
+      remaining === 10 ||
+      (remaining <= 5 && remaining > 0)
+    ) {
+      this._announce(`${remaining} seconds left to record.`);
+    }
+    if (remaining === 0) this._announce("Recording time is up.");
+  },
+
+  // Same shape as the announce() helper in think_time_countdown.js;
+  // duplicated here so each hook owns its dedupe state. Writes into
+  // the shared #countdown-announce aria-live region in the LV template.
+  _announce(text) {
+    const el = document.getElementById("countdown-announce");
+    if (!el) return;
+    const next = text === this._lastAnnouncement ? text + "​" : text;
+    el.textContent = next;
+    this._lastAnnouncement = text;
   },
 
   // --- Mic-level indicator --------------------------------------------

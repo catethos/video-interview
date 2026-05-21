@@ -350,6 +350,30 @@ defmodule InterviewWeb.CaptureLiveTest do
     end
   end
 
+  describe "accessibility — aria-live countdown announcements" do
+    test "renders a shared aria-live='polite' announcement target on authenticated pages",
+         %{conn: conn} do
+      %{session: session} = graph!()
+      {:ok, _view, html} = live(conn, capture_path(session))
+
+      assert html =~ ~s|id="countdown-announce"|
+      assert html =~ ~s|aria-live="polite"|
+      assert html =~ ~s|aria-atomic="true"|
+      # Should be sr-only so it doesn't visually clutter the page.
+      assert html =~ ~s|class="sr-only"|
+    end
+
+    test "does NOT render the announcement target while awaiting auth",
+         %{conn: conn} do
+      # :awaiting_auth uses its own minimal render clause (no shared
+      # header), so the countdown target shouldn't bleed in there.
+      %{session: session} = graph!()
+      {:ok, _view, html} = live(conn, ~p"/capture/#{session.id}")
+
+      refute html =~ ~s|id="countdown-announce"|
+    end
+  end
+
   describe "think-time + recording countdowns" do
     test "renders the think-time phrase when the question has think_time_seconds",
          %{conn: conn} do

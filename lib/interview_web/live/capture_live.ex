@@ -796,6 +796,22 @@ defmodule InterviewWeb.CaptureLive do
 
     ~H"""
     <div class="mx-auto max-w-4xl px-6 sm:px-10 py-12 sm:py-16 space-y-14">
+      <%!--
+        Shared aria-live announcement target for time-sensitive
+        countdowns (think-time, idle-to-record, recording-time). Hidden
+        visually; updated by JS hooks only at milestones (every 10s or
+        the final 5s) so screen-reader users get useful cues without
+        per-second noise.
+      --%>
+      <span
+        id="countdown-announce"
+        data-role="countdown-announce"
+        class="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+      </span>
+
       <header>
         <div class="flex flex-wrap items-baseline justify-between gap-3">
           <p class="zen-eyebrow">

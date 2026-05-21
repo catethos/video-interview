@@ -167,6 +167,22 @@ body > * { position: relative; z-index: 1; }
   border-radius: 1px;
 }
 
+/* Visually hidden but read by screen readers. The standard WCAG
+ * pattern: clip-path:inset(50%) is the canonical implementation; the
+ * older width:1px/height:1px/overflow:hidden recipe is also valid but
+ * has occasional layout side effects. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
    Editorial primitives.
    ────────────────────────────────────────────────────────────────────── */

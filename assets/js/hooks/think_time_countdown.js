@@ -31,6 +31,12 @@ const CINEMATIC_LAST_SECONDS = 3;
 // it the candidate could sit idle indefinitely after the prep window.
 const IDLE_AUTO_START_SECONDS = 10;
 
+// Screen-reader announcement milestones. Announcing every second
+// is unusable noise; these are the moments where the audio cue
+// carries real information.
+const THINK_TIME_ANNOUNCE_AT = new Set([30, 20, 10, 5, 4, 3, 2, 1]);
+const IDLE_ANNOUNCE_AT = new Set([10, 5, 4, 3, 2, 1]);
+
 const ThinkTimeCountdown = {
   mounted() {
     const total = Number.parseInt(this.el.dataset.thinkSeconds || "0", 10);
@@ -129,6 +135,9 @@ const ThinkTimeCountdown = {
       this.el.textContent = `Recording starts in ${SPELL[n] || n}.`;
       this.renderCinematic(n);
     }
+    if (IDLE_ANNOUNCE_AT.has(n)) {
+      announce(`Recording auto-starts in ${n} seconds. Click record to start sooner.`);
+    }
   },
 
   // Two visual states:
@@ -144,6 +153,7 @@ const ThinkTimeCountdown = {
       this.el.textContent = "Ready when you are.";
       this.el.classList.add("think-time-done");
       this.clearCinematic();
+      announce("Think-time over. Get ready to record.");
       return;
     }
     if (this.remaining <= 5) {
@@ -153,6 +163,9 @@ const ThinkTimeCountdown = {
     }
     if (this.remaining <= CINEMATIC_LAST_SECONDS) {
       this.renderCinematic(this.remaining);
+    }
+    if (THINK_TIME_ANNOUNCE_AT.has(this.remaining)) {
+      announce(`Recording begins in ${this.remaining} seconds.`);
     }
   },
 
@@ -186,6 +199,21 @@ const ThinkTimeCountdown = {
 function isPhasePrep() {
   const el = document.querySelector("[data-phase]");
   return !!el && el.dataset.phase === "prep";
+}
+
+// Write a short string into the shared aria-live="polite" region so
+// screen readers announce it. The region is rendered by the LV
+// template (id="countdown-announce") and is otherwise visually hidden.
+// We bust identical text by appending a zero-width space when the
+// new message matches the previous — browsers skip announcing
+// identical text in some implementations.
+let lastAnnouncement = "";
+function announce(text) {
+  const el = document.getElementById("countdown-announce");
+  if (!el) return;
+  const next = text === lastAnnouncement ? text + "​" : text;
+  el.textContent = next;
+  lastAnnouncement = text;
 }
 
 export default ThinkTimeCountdown;
