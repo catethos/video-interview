@@ -217,6 +217,45 @@ defmodule Interview.Capture do
   end
 
   @doc """
+  Summary of focus-loss events for a response: count of "lost" events
+  + total milliseconds the candidate's tab was unfocused. We walk the
+  events in chronological order and pair each "lost" with the next
+  "regained"; the duration between them is added to the total.
+
+  Unpaired "lost" events (last event was "lost" with no following
+  "regained" — candidate closed the tab, or never returned) still
+  count toward the `count` but contribute zero to `total_ms`. We
+  could synthesize an end timestamp from the response's
+  `finalized_at`, but the count alone is the meaningful signal there.
+  """
+  def focus_loss_summary(response_id) when is_binary(response_id) do
+    events =
+      from(f in Interview.Capture.FocusEvent,
+        where: f.response_id == ^response_id,
+        order_by: f.occurred_at,
+        select: {f.kind, f.occurred_at}
+      )
+      |> Repo.all()
+
+    {count, total_ms, _open_lost_at} =
+      Enum.reduce(events, {0, 0, nil}, fn
+        {"lost", at}, {count, total, _prev_lost} ->
+          {count + 1, total, at}
+
+        {"regained", at}, {count, total, prev_lost} when not is_nil(prev_lost) ->
+          diff = DateTime.diff(at, prev_lost, :millisecond)
+          {count, total + max(diff, 0), nil}
+
+        {"regained", _at}, acc ->
+          # Unpaired "regained" with no prior "lost" — probably a
+          # browser event order artifact; ignore.
+          acc
+      end)
+
+    %{count: count, total_ms: total_ms}
+  end
+
+  @doc """
   Claim (or refresh) the writer for a `(session, question, attempt)`.
 
   Behaviour (PLAN §5.1):

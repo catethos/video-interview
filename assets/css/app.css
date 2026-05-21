@@ -463,15 +463,29 @@ body > * { position: relative; z-index: 1; }
   padding-bottom: 0;
 }
 
-/* During :intro the candidate sees the preview (so they can verify
- * camera/mic works) but must NOT be able to start recording before
- * accepting the disclosure gate. The recorder section itself uses
- * phx-update="ignore" so we can't toggle children from LV; we drive
- * visibility from the surrounding wrapper's data-phase attribute,
- * which LiveView updates normally. */
-[data-phase="intro"] [data-action="start"],
-[data-phase="intro"] [data-action="stop"] {
+/* Recorder button visibility is gated by the surrounding wrapper's
+ * data-phase. The recorder section itself uses phx-update="ignore"
+ * so its children can't change per phase; we use CSS on the wrapper
+ * (which IS updated by LV) to show/hide.
+ *
+ * Visibility matrix:
+ *   data-action="request" (Open camera) → any phase, hidden once
+ *                                          data-camera-state="on"
+ *                                          (see rule below)
+ *   data-action="start"   (Record)      → :prep only
+ *   data-action="stop"    (Stop)        → :recording only
+ *
+ * Default: hide. Per-phase rules below opt in.
+ */
+[data-action="start"],
+[data-action="stop"] {
   display: none;
+}
+[data-phase="prep"] [data-action="start"] {
+  display: inline-flex;
+}
+[data-phase="recording"] [data-action="stop"] {
+  display: inline-flex;
 }
 
 /* Once the camera is open, hide the "Open camera" CTA — keeping it
