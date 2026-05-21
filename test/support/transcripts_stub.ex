@@ -14,12 +14,24 @@ defmodule Interview.TranscriptsStub do
         raise "TranscriptsStub.transcribe/1 called from a non-test pid (no $callers, no test pid in pdict)"
 
       pid ->
-        do_transcribe(pid, audio_path)
+        do_call(pid, :transcribe, audio_path, default_transcribe_response())
     end
   end
 
-  defp do_transcribe(pid, audio_path) do
-    send(pid, {:transcribe_call, %{audio_path: audio_path}})
+  @impl true
+  def transcribe_vtt(audio_path) do
+    case caller_pid() do
+      nil ->
+        raise "TranscriptsStub.transcribe_vtt/1 called from a non-test pid (no $callers, no test pid in pdict)"
+
+      pid ->
+        do_call(pid, :transcribe_vtt, audio_path, default_vtt_response())
+    end
+  end
+
+  defp do_call(pid, op, audio_path, default) do
+    send(pid, {op, %{audio_path: audio_path}})
+    send(pid, {:transcribe_call, %{audio_path: audio_path, op: op}})
 
     case :ets.lookup(table(), {:script, pid}) do
       [{_, [next | rest]}] ->
@@ -27,9 +39,20 @@ defmodule Interview.TranscriptsStub do
         next
 
       _ ->
-        {:ok, %{text: "stub transcript", provider: "stub"}}
+        default
     end
   end
+
+  defp default_transcribe_response,
+    do: {:ok, %{text: "stub transcript", provider: "stub"}}
+
+  defp default_vtt_response,
+    do:
+      {:ok,
+       %{
+         vtt: "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nstub caption\n",
+         provider: "stub"
+       }}
 
   @doc """
   Programme the stub to return `responses` in order for the calling pid.

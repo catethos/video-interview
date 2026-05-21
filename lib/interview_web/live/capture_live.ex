@@ -1053,7 +1053,24 @@ defmodule InterviewWeb.CaptureLive do
                 preload="auto"
                 class="w-full max-w-xl rounded-sm bg-black/95"
                 src={~p"/capture/#{@session_id}/prompt_assets/#{@current_question.prompt_asset_id}"}
+                crossorigin="anonymous"
               >
+                <%!--
+                  Auto-generated WebVTT track via Workers.PromptAssetCaption.
+                  The endpoint 404s when the caption job hasn't finished —
+                  modern browsers handle that gracefully (no captions
+                  shown, no error displayed). srclang="en" matches the
+                  hardcoded Whisper language="en" in the adapter.
+                --%>
+                <track
+                  kind="captions"
+                  src={
+                    ~p"/capture/#{@session_id}/prompt_assets/#{@current_question.prompt_asset_id}/captions.vtt"
+                  }
+                  srclang="en"
+                  label="English"
+                  default
+                />
               </video>
             </div>
           </div>

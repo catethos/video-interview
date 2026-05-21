@@ -25,8 +25,14 @@ config :interview, InterviewWeb.Endpoint,
 
 # Whisper transcripts (PLAN decision #9). Turn on only when OPENAI_API_KEY
 # is set so dev/self-hosted deployments without a key don't permafail
-# every transcript job. Tests configure their own adapter in config/test.exs.
-if openai_key = System.get_env("OPENAI_API_KEY") do
+# every transcript job. The `config_env() != :test` guard keeps the
+# stub adapter in place during tests even when the developer has
+# OPENAI_API_KEY exported in their shell — otherwise this block would
+# silently override config/test.exs and tests would start hitting the
+# real OpenAI API (PR #?? — caught during caption-track work).
+openai_key = System.get_env("OPENAI_API_KEY")
+
+if config_env() != :test and is_binary(openai_key) and openai_key != "" do
   config :interview, Interview.Transcripts,
     enabled: true,
     adapter: Interview.Transcripts.OpenAI,

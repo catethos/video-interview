@@ -36,6 +36,31 @@ defmodule InterviewWeb.PromptAssetPlaybackController do
     end
   end
 
+  @doc """
+  Stream the auto-generated WebVTT caption track for a prompt video.
+  Same auth model as `show/2` (knowledge of the session_id is the
+  bearer; the asset must be referenced from this session's template
+  version). Returns 404 if captions haven't been generated yet — the
+  candidate-side `<track>` element handles that gracefully (just
+  shows the video without subtitles).
+
+      GET /capture/:session_id/prompt_assets/:asset_id/captions.vtt
+  """
+  def captions(conn, %{"session_id" => session_id, "asset_id" => asset_id}) do
+    with %PromptAsset{caption_storage_key: key} when is_binary(key) <-
+           PromptAssets.get_for_candidate(session_id, asset_id),
+         path = Storage.artifact_path(key),
+         {:ok, %{size: size}} <- File.stat(path) do
+      conn
+      |> put_resp_content_type("text/vtt")
+      |> put_resp_header("cache-control", @cache_control)
+      |> put_resp_header("content-length", Integer.to_string(size))
+      |> send_file(200, path)
+    else
+      _ -> not_found(conn)
+    end
+  end
+
   defp send_artifact(conn, path, size, _asset, mime) do
     conn =
       conn

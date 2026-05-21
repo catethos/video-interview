@@ -153,6 +153,10 @@ defmodule InterviewWeb.Router do
   # filter, so we can serve video/image/pdf.
   scope "/capture", InterviewWeb do
     get "/:session_id/prompt_assets/:asset_id", PromptAssetPlaybackController, :show
+
+    get "/:session_id/prompt_assets/:asset_id/captions.vtt",
+        PromptAssetPlaybackController,
+        :captions
   end
 
   scope "/api/prompt_assets", InterviewWeb do

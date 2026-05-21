@@ -25,18 +25,43 @@ defmodule Interview.Transcripts.OpenAI do
   @impl true
   def transcribe(audio_path) when is_binary(audio_path) do
     case api_key() do
-      key when is_binary(key) and byte_size(key) > 0 -> do_post(audio_path, key)
-      _ -> {:error, :missing_api_key}
+      key when is_binary(key) and byte_size(key) > 0 ->
+        do_post(audio_path, key, response_format: "json")
+
+      _ ->
+        {:error, :missing_api_key}
     end
   end
 
-  defp do_post(path, api_key) do
+  @impl true
+  def transcribe_vtt(audio_path) when is_binary(audio_path) do
+    case api_key() do
+      key when is_binary(key) and byte_size(key) > 0 ->
+        do_post(audio_path, key, response_format: "vtt")
+
+      _ ->
+        {:error, :missing_api_key}
+    end
+  end
+
+  defp do_post(path, api_key, opts) do
+    response_format = Keyword.fetch!(opts, :response_format)
     boundary = "----InterviewWhisperBoundary#{System.unique_integer([:positive])}"
-    body = multipart_body(path, boundary)
+    body = multipart_body(path, boundary, response_format)
+
+    # When asking for VTT we want plain text back, not JSON, so let the
+    # server know via Accept. (OpenAI also honors response_format=vtt
+    # and emits text/vtt regardless, but being explicit matches the
+    # rest of the request shape.)
+    accept =
+      case response_format do
+        "vtt" -> ~c"text/vtt"
+        _ -> ~c"application/json"
+      end
 
     headers = [
       {~c"Authorization", String.to_charlist("Bearer " <> api_key)},
-      {~c"Accept", ~c"application/json"}
+      {~c"Accept", accept}
     ]
 
     content_type = String.to_charlist("multipart/form-data; boundary=" <> boundary)
@@ -54,7 +79,7 @@ defmodule Interview.Transcripts.OpenAI do
 
     case :httpc.request(:post, request, http_opts, body_format: :binary) do
       {:ok, {{_v, 200, _r}, _h, resp_body}} ->
-        decode_text(resp_body)
+        decode_success(resp_body, response_format)
 
       {:ok, {{_v, 401, _r}, _h, _}} ->
         {:error, :unauthorized}
@@ -73,7 +98,7 @@ defmodule Interview.Transcripts.OpenAI do
     end
   end
 
-  defp decode_text(resp_body) do
+  defp decode_success(resp_body, "json") do
     case Jason.decode(to_string(resp_body)) do
       {:ok, %{"text" => text}} when is_binary(text) ->
         {:ok, %{text: text, provider: @provider}}
@@ -86,7 +111,22 @@ defmodule Interview.Transcripts.OpenAI do
     end
   end
 
-  defp multipart_body(file_path, boundary) do
+  defp decode_success(resp_body, "vtt") do
+    vtt = to_string(resp_body)
+
+    # Sanity-check that the body actually looks like WebVTT — if Whisper
+    # ever silently returned something unexpected (e.g. an HTML error
+    # page from a stale proxy), `<track>` would render nothing without
+    # any indication of why. The first line of a valid file is "WEBVTT"
+    # (optionally followed by a description).
+    if String.starts_with?(vtt, "WEBVTT") do
+      {:ok, %{vtt: vtt, provider: @provider}}
+    else
+      {:error, {:decode_failed, preview(vtt)}}
+    end
+  end
+
+  defp multipart_body(file_path, boundary, response_format) do
     file_bytes = File.read!(file_path)
     filename = Path.basename(file_path)
 
@@ -116,6 +156,14 @@ defmodule Interview.Transcripts.OpenAI do
       crlf,
       crlf,
       "en",
+      crlf,
+      dash,
+      boundary,
+      crlf,
+      "Content-Disposition: form-data; name=\"response_format\"",
+      crlf,
+      crlf,
+      response_format,
       crlf,
       dash,
       boundary,
