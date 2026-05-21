@@ -446,6 +446,23 @@ body > * { position: relative; z-index: 1; }
   border-bottom: 0;
   padding-bottom: 0;
 }
+
+/* During :intro the candidate sees the preview (so they can verify
+ * camera/mic works) but must NOT be able to start recording before
+ * accepting the disclosure gate. The recorder section itself uses
+ * phx-update="ignore" so we can't toggle children from LV; we drive
+ * visibility from the surrounding wrapper's data-phase attribute,
+ * which LiveView updates normally. */
+[data-phase="intro"] [data-action="start"],
+[data-phase="intro"] [data-action="stop"] {
+  display: none;
+}
+
+/* Once the camera is open, hide the "Open camera" CTA — keeping it
+ * visible suggests the candidate might need to reopen it. */
+[data-camera-state="on"] [data-action="request"] {
+  display: none;
+}
 .recording-countdown-receding {
   border-bottom-color: color-mix(in oklch, currentColor 40%, transparent);
 }
