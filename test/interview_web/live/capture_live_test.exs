@@ -350,6 +350,75 @@ defmodule InterviewWeb.CaptureLiveTest do
     end
   end
 
+  describe "focus telemetry" do
+    test "focus_lost during :recording inserts a focus event row", %{conn: conn} do
+      %{session: session, question: question} = graph!()
+      seed_existing_response!(session, question)
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      # Transition into :recording the same way the real flow does.
+      render_hook(view, "recorder_started", %{
+        "captureInstanceId" => "cap-test",
+        "mimeType" => "video/webm"
+      })
+
+      # Need a response_id on the socket for the persistence path.
+      :sys.replace_state(view.pid, fn s ->
+        # Find any response row to attach for the test.
+        r = Repo.one(from(r in Response, where: r.session_id == ^session.id, limit: 1))
+        socket = %{s.socket | assigns: Map.put(s.socket.assigns, :response_id, r.id)}
+        %{s | socket: socket}
+      end)
+
+      iso = DateTime.utc_now() |> DateTime.to_iso8601()
+      render_hook(view, "focus_lost", %{"at" => iso})
+
+      response_id = :sys.get_state(view.pid).socket.assigns.response_id
+      assert Capture.count_focus_losses(response_id) == 1
+    end
+
+    test "focus_lost outside :recording is silently dropped", %{conn: conn} do
+      %{session: session, question: question} = graph!()
+      seed_existing_response!(session, question)
+      {:ok, view, _html} = live(conn, capture_path(session))
+      # Stay in :prep — no recording started.
+
+      iso = DateTime.utc_now() |> DateTime.to_iso8601()
+      render_hook(view, "focus_lost", %{"at" => iso})
+
+      r = Repo.one(from(r in Response, where: r.session_id == ^session.id, limit: 1))
+      assert Capture.count_focus_losses(r.id) == 0
+    end
+
+    test "duplicate focus events (same response_id + occurred_at + kind) no-op",
+         %{conn: conn} do
+      # Browsers (Safari especially) fire blur + visibilitychange in the
+      # same tick. The hook coalesces but if a duplicate slips through
+      # the server-side unique constraint catches it.
+      %{session: session, question: question} = graph!()
+      seed_existing_response!(session, question)
+      {:ok, view, _html} = live(conn, capture_path(session))
+
+      render_hook(view, "recorder_started", %{
+        "captureInstanceId" => "cap-test",
+        "mimeType" => "video/webm"
+      })
+
+      :sys.replace_state(view.pid, fn s ->
+        r = Repo.one(from(r in Response, where: r.session_id == ^session.id, limit: 1))
+        socket = %{s.socket | assigns: Map.put(s.socket.assigns, :response_id, r.id)}
+        %{s | socket: socket}
+      end)
+
+      iso = DateTime.utc_now() |> DateTime.to_iso8601()
+      render_hook(view, "focus_lost", %{"at" => iso})
+      render_hook(view, "focus_lost", %{"at" => iso})
+
+      response_id = :sys.get_state(view.pid).socket.assigns.response_id
+      assert Capture.count_focus_losses(response_id) == 1
+    end
+  end
+
   describe "accessibility — aria-live countdown announcements" do
     test "renders a shared aria-live='polite' announcement target on authenticated pages",
          %{conn: conn} do

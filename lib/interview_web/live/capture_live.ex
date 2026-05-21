@@ -297,6 +297,19 @@ defmodule InterviewWeb.CaptureLive do
     {:noreply, socket}
   end
 
+  # Tab/window focus telemetry from the JS hook. Recorded only when
+  # the candidate is actively recording — outside that window the
+  # signal isn't useful (a tab-switch during think-time is just normal
+  # multitasking). We never block on persistence: insert is best-effort
+  # so a transient DB hiccup doesn't break the take.
+  def handle_event("focus_lost", %{"at" => iso8601}, socket) do
+    {:noreply, record_focus_event_if_recording(socket, "lost", iso8601)}
+  end
+
+  def handle_event("focus_regained", %{"at" => iso8601}, socket) do
+    {:noreply, record_focus_event_if_recording(socket, "regained", iso8601)}
+  end
+
   def handle_event("intro_ready", _params, socket) do
     # Candidate accepted the disclosure on the intro screen and is
     # ready to begin. Transition into the standard per-question flow.
@@ -671,6 +684,21 @@ defmodule InterviewWeb.CaptureLive do
        do: Enum.at(qs, i)
 
   defp current_question(_), do: nil
+
+  # Best-effort persistence of a tab-focus event from the JS hook.
+  # Recorded only when the candidate is actively recording — outside
+  # that window the signal isn't meaningful (think-time tab-switches
+  # are just normal multitasking).
+  defp record_focus_event_if_recording(socket, kind, iso8601) do
+    with :recording <- socket.assigns.phase,
+         rid when is_binary(rid) <- socket.assigns[:response_id],
+         {:ok, at, _offset} <- DateTime.from_iso8601(iso8601) do
+      _ = Capture.record_focus_event(rid, kind, at)
+      socket
+    else
+      _ -> socket
+    end
+  end
 
   defp below_min?(_q, nil), do: false
 

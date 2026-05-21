@@ -33,7 +33,8 @@ defmodule Interview.ExternalIntegration.ScoringExport do
           question_text: String.t(),
           answer_text: String.t() | nil,
           response_id: String.t() | nil,
-          duration_ms: non_neg_integer() | nil
+          duration_ms: non_neg_integer() | nil,
+          focus_lost_count: non_neg_integer()
         }
 
   @doc """
@@ -96,12 +97,19 @@ defmodule Interview.ExternalIntegration.ScoringExport do
          template_question: q,
          selected_response: selected_response
        }) do
+    focus_lost_count =
+      case selected_response do
+        %{id: rid} -> Interview.Capture.count_focus_losses(rid)
+        _ -> 0
+      end
+
     %{
       question_number: q.position,
       question_text: q.prompt_text,
       answer_text: selected_response && selected_response.transcript_text,
       response_id: selected_response && selected_response.id,
-      duration_ms: selected_response && selected_response.duration_ms
+      duration_ms: selected_response && selected_response.duration_ms,
+      focus_lost_count: focus_lost_count
     }
   end
 end

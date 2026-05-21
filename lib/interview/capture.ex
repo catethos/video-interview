@@ -170,6 +170,52 @@ defmodule Interview.Capture do
     Repo.exists?(from(r in Response, where: r.session_id == ^session_id))
   end
 
+  # ---- Focus telemetry ----------------------------------------------------
+  #
+  # Soft cheating signal: how many times did the candidate's tab lose
+  # focus while they were recording? Persisted per response so the
+  # recruiter dashboard can show "left tab 2× during this answer".
+  # NOT used in the AI scoring pipeline — purely informational.
+
+  @doc """
+  Record a focus event for a (response, kind, occurred_at). Idempotent
+  on the natural key (the JS hook may double-fire on browsers that
+  emit blur + visibilitychange together).
+
+  Returns `:ok` on insert, `{:error, :invalid}` on validation failure,
+  and `:ok` on conflict (already recorded).
+  """
+  def record_focus_event(response_id, kind, %DateTime{} = occurred_at)
+      when is_binary(response_id) and kind in ["lost", "regained"] do
+    changeset =
+      Interview.Capture.FocusEvent.changeset(%Interview.Capture.FocusEvent{}, %{
+        response_id: response_id,
+        kind: kind,
+        occurred_at: occurred_at
+      })
+
+    case Repo.insert(changeset, on_conflict: :nothing) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, :invalid}
+    end
+  end
+
+  def record_focus_event(_, _, _), do: {:error, :invalid}
+
+  @doc """
+  Count "lost" focus events for a response. "Regained" events are
+  paired diagnostics, not weighted — what matters is how many times
+  the candidate's attention left, not whether they came back.
+  """
+  def count_focus_losses(response_id) when is_binary(response_id) do
+    Repo.aggregate(
+      from(f in Interview.Capture.FocusEvent,
+        where: f.response_id == ^response_id and f.kind == "lost"
+      ),
+      :count
+    )
+  end
+
   @doc """
   Claim (or refresh) the writer for a `(session, question, attempt)`.
 

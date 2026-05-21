@@ -62,6 +62,23 @@ const Recorder = {
     this.onAutoStart = () => this.startRecording();
     document.addEventListener("candidate:auto-start-recording", this.onAutoStart);
 
+    // Focus telemetry: tab/window blur or visibilitychange are recorded
+    // server-side so the recruiter dashboard can surface "candidate left
+    // the tab 2× during this answer". The LV only persists when phase
+    // is :recording (see capture_live.ex handle_event); we fire from JS
+    // unconditionally and let the server filter. Coalescing window
+    // collapses blur+visibilitychange pairs that some browsers fire
+    // together (~250ms).
+    this.onVisibility = () => {
+      if (document.visibilityState === "hidden") this.fireFocusEvent("focus_lost");
+      else this.fireFocusEvent("focus_regained");
+    };
+    this.onBlur = () => this.fireFocusEvent("focus_lost");
+    this.onFocus = () => this.fireFocusEvent("focus_regained");
+    document.addEventListener("visibilitychange", this.onVisibility);
+    window.addEventListener("blur", this.onBlur);
+    window.addEventListener("focus", this.onFocus);
+
     if (window.parent && window.parent !== window) {
       this.bindPostMessage();
       this.postToParent({ type: "ready" });
@@ -95,6 +112,11 @@ const Recorder = {
     if (this.onAutoStart) {
       document.removeEventListener("candidate:auto-start-recording", this.onAutoStart);
     }
+    if (this.onVisibility) {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+    }
+    if (this.onBlur) window.removeEventListener("blur", this.onBlur);
+    if (this.onFocus) window.removeEventListener("focus", this.onFocus);
     if (this.core) this.core.destroy();
     this.stopRecordingCountdown();
     this.stopMicLevelLoop();
@@ -416,6 +438,21 @@ const Recorder = {
     const next = text === this._lastAnnouncement ? text + "​" : text;
     el.textContent = next;
     this._lastAnnouncement = text;
+  },
+
+  // --- Focus telemetry ------------------------------------------------
+  //
+  // Coalesce blur + visibilitychange events that fire in the same
+  // ~250ms window (some browsers — Safari especially — fire both on
+  // backgrounding). The server uses (response_id, occurred_at, kind)
+  // as a unique key so duplicate inserts no-op, but de-duping client-
+  // side keeps the channel cleaner.
+
+  fireFocusEvent(name) {
+    const now = Date.now();
+    if (this.lastFocusEventAt && now - this.lastFocusEventAt < 250) return;
+    this.lastFocusEventAt = now;
+    this.pushEvent(name, { at: new Date(now).toISOString() });
   },
 
   // --- Mic-level indicator --------------------------------------------
