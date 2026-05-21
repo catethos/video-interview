@@ -158,6 +158,19 @@ defmodule Interview.Capture do
   end
 
   @doc """
+  Has the candidate begun answering on this session yet?
+
+  Used by the capture LiveView to distinguish a fresh landing (show
+  the intro/disclosure gate) from a mid-interview reload (skip the
+  gate and go straight to the current question). The session row's
+  `state` field is set to `"in_progress"` at creation time so it
+  isn't a useful signal on its own — `any_responses?/1` is.
+  """
+  def any_responses?(session_id) when is_binary(session_id) do
+    Repo.exists?(from(r in Response, where: r.session_id == ^session_id))
+  end
+
+  @doc """
   Claim (or refresh) the writer for a `(session, question, attempt)`.
 
   Behaviour (PLAN §5.1):

@@ -165,11 +165,21 @@ defmodule InterviewWeb.CaptureLive do
   defp initial_phase([], _session), do: :review
   defp initial_phase(_questions, %Session{state: "submitted"}), do: :submitted
   defp initial_phase(_questions, %Session{state: "ready"}), do: :submitted
-  # Fresh session: candidate sees the intro/disclosure gate before Q1.
-  # In_progress sessions (mid-interview) skip straight to the question
-  # flow — they've already accepted the gate on a prior page-load.
-  defp initial_phase(_questions, %Session{state: "in_progress"}), do: :prep
-  defp initial_phase(_questions, _session), do: :intro
+
+  defp initial_phase(_questions, %Session{} = session) do
+    # Sessions are inserted with state="in_progress" at /api/sessions
+    # time (see session_controller.ex), so we can't use that field to
+    # distinguish a fresh landing from a mid-interview reload. Use the
+    # presence of recorded responses instead: if the candidate has any
+    # answers stored, they've been past the intro gate already and we
+    # send them straight to the current question. Otherwise show the
+    # intro/disclosure screen.
+    if Capture.any_responses?(session.id) do
+      :prep
+    else
+      :intro
+    end
+  end
 
   # Map of `prompt_asset_id => "image" | "pdf" | "video" | …`. Used by
   # `render_attachment` to pick the right element (img / iframe / link).
@@ -1138,8 +1148,8 @@ defmodule InterviewWeb.CaptureLive do
 
   defp render_intro(assigns) do
     ~H"""
-    <section class="max-w-xl mx-auto space-y-10 py-4">
-      <div class="space-y-5">
+    <div class="max-w-xl mx-auto space-y-10">
+      <section class="space-y-5">
         <h2 class="font-display text-[clamp(1.8rem,4.5vw,2.6rem)] leading-[1.15] tracking-[-0.018em] font-light">
           A few <em class="italic font-light text-primary">moments</em> before we begin.
         </h2>
@@ -1148,7 +1158,7 @@ defmodule InterviewWeb.CaptureLive do
           prompt you'll have a brief think-time, then you record your answer
           straight into the browser.
         </p>
-      </div>
+      </section>
 
       <ul class="space-y-2 text-[14.5px] leading-[1.55] text-base-content/75 max-w-[44ch]">
         <li class="flex gap-3">
@@ -1157,7 +1167,7 @@ defmodule InterviewWeb.CaptureLive do
         </li>
         <li class="flex gap-3">
           <span class="zen-eyebrow text-[10px] mt-1 opacity-55">02</span>
-          <span>You'll be asked to allow camera and microphone access on the next step.</span>
+          <span>Allow camera and microphone access when prompted.</span>
         </li>
         <li class="flex gap-3">
           <span class="zen-eyebrow text-[10px] mt-1 opacity-55">03</span>
@@ -1171,17 +1181,51 @@ defmodule InterviewWeb.CaptureLive do
         recording before any hiring decision.
       </p>
 
-      <div class="pt-2">
-        <button
-          type="button"
-          phx-click="intro_ready"
-          class="zen-link text-base-content text-[15px]"
-        >
-          <span class="zen-arrow" aria-hidden="true">→</span>
-          <span>I'm ready</span>
-        </button>
+      <%!--
+        Recorder hook mounts here during :intro so the candidate can
+        grant camera + mic permission BEFORE the "I'm ready" CTA
+        appears. We reuse render_recorder unchanged — the same hook
+        instance stays alive across the :intro → :prep transition
+        (same #recorder id), so the granted MediaStream survives.
+      --%>
+      <div
+        class="space-y-7 min-w-0"
+        data-camera-state={if @permission_state == "granted", do: "on", else: "off"}
+        data-phase={@phase}
+      >
+        {render_recorder(assigns)}
       </div>
-    </section>
+
+      {render_intro_cta(assigns)}
+    </div>
+    """
+  end
+
+  defp render_intro_cta(assigns) do
+    ~H"""
+    <div class="pt-2">
+      <%= cond do %>
+        <% @permission_state == "granted" -> %>
+          <button
+            type="button"
+            phx-click="intro_ready"
+            class="zen-link text-base-content text-[15px]"
+          >
+            <span class="zen-arrow" aria-hidden="true">→</span>
+            <span>I'm ready</span>
+          </button>
+        <% @permission_state == "requesting" -> %>
+          <p class="text-[13.5px] italic leading-[1.55] text-base-content/65">
+            Waiting for your browser to confirm camera and microphone access…
+          </p>
+        <% true -> %>
+          <p class="text-[13.5px] leading-[1.55] text-base-content/65 max-w-[44ch]">
+            Allow camera and microphone above. The <em class="italic">"I'm ready"</em>
+            button will appear here once
+            access is granted.
+          </p>
+      <% end %>
+    </div>
     """
   end
 

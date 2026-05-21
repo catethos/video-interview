@@ -16,13 +16,45 @@ defmodule InterviewWeb.CaptureLiveTest do
     ~p"/capture/#{session.id}?token=#{token}"
   end
 
-  test "GET /capture/:id renders the recorder when the session exists", %{conn: conn} do
+  # Test helper: seed a `Response` row on the session so that the
+  # capture LV's initial_phase/2 (which checks `any_responses?/1`)
+  # routes to :prep instead of :intro. Used by tests that want to
+  # exercise the question-flow surface and don't care about the
+  # intro gate.
+  defp seed_existing_response!(session, question) do
+    {:ok, _r} =
+      %Response{
+        session_id: session.id,
+        template_question_id: question.id,
+        attempt_number: 1,
+        state: "pending"
+      }
+      |> Repo.insert()
+
+    session
+  end
+
+  # Test helper: simulate the candidate accepting the intro gate.
+  # The intro screen gates the "I'm ready" button behind a granted
+  # camera/mic permission, so we simulate that first via the same
+  # `permission` hook event the real JS recorder fires after a
+  # successful getUserMedia call.
+  defp accept_intro!(view) do
+    render_hook(view, "permission", %{"state" => "granted"})
+    view |> element("button", "I'm ready") |> render_click()
+    view
+  end
+
+  test "GET /capture/:id lands on the intro gate for a fresh session", %{conn: conn} do
+    # Fresh sessions (no responses) drop the candidate on the intro
+    # screen with the AI-evaluation disclosure, not Q1 directly.
     %{session: session} = graph!()
 
     {:ok, _view, html} = live(conn, capture_path(session))
     assert html =~ "Interview"
     assert html =~ session.id
-    assert html =~ "Question 1 of 1"
+    assert html =~ "Welcome"
+    refute html =~ "Question 1 of 1"
   end
 
   test "GET /capture/:id without token renders awaiting-auth view", %{conn: conn} do
@@ -55,10 +87,13 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     reply = render_hook(view, "auth", %{"token" => token})
     # render_hook does not return :reply payload (per AGENTS.md gotcha) —
-    # observe transition via the rendered HTML instead.
+    # observe transition via the rendered HTML instead. A fresh session
+    # exits :awaiting_auth into :intro (the new disclosure gate); the
+    # question screen is one click away.
     _ = reply
     html = render(view)
-    assert html =~ "Question 1 of 1"
+    refute html =~ "Loading"
+    assert html =~ "Welcome"
   end
 
   test "duplicate auth event after authentication is idempotent (hook remount)", %{conn: conn} do
@@ -178,14 +213,18 @@ defmodule InterviewWeb.CaptureLiveTest do
       assert state.socket.assigns.phase == :intro
     end
 
-    test "mid-interview (in_progress) session skips the intro", %{conn: conn} do
-      # An in-progress session means the candidate already accepted the
-      # gate on a prior page-load; bouncing them through it again would
-      # be annoying. Existing graph!/1 default is in_progress.
-      %{session: session} = graph!()
+    test "mid-interview session (existing responses) skips the intro",
+         %{conn: conn} do
+      # A session with at least one recorded response means the candidate
+      # already accepted the gate on a prior page-load. Bouncing them
+      # back through it would be annoying.
+      %{session: session, question: question} = graph!()
+      seed_existing_response!(session, question)
+
       {:ok, view, html} = live(conn, capture_path(session))
 
       assert html =~ "Question 1 of 1"
+      refute html =~ "Welcome"
       state = :sys.get_state(view.pid)
       assert state.socket.assigns.phase == :prep
     end
@@ -194,11 +233,32 @@ defmodule InterviewWeb.CaptureLiveTest do
       %{session: session} = graph!(%{session: %{state: "pending"}})
       {:ok, view, _html} = live(conn, capture_path(session))
 
+      # The "I'm ready" CTA is gated behind a granted camera/mic
+      # permission. Simulate the recorder hook's `permission` event
+      # firing on a successful getUserMedia call.
+      render_hook(view, "permission", %{"state" => "granted"})
       view |> element("button", "I'm ready") |> render_click()
 
       state = :sys.get_state(view.pid)
       assert state.socket.assigns.phase == :prep
       assert render(view) =~ "Question 1 of 1"
+    end
+
+    test "the I'm ready CTA is hidden until permission is granted",
+         %{conn: conn} do
+      %{session: session} = graph!(%{session: %{state: "pending"}})
+      {:ok, view, html} = live(conn, capture_path(session))
+
+      # The button itself is gated; the surrounding intro copy mentions
+      # the button text by name, so we check for the actual button
+      # element rather than a substring match on the text.
+      refute html =~ ~s|phx-click="intro_ready"|
+      assert html =~ "Allow camera and microphone above"
+
+      render_hook(view, "permission", %{"state" => "granted"})
+      state = :sys.get_state(view.pid)
+      assert state.socket.assigns.permission_state == "granted"
+      assert render(view) =~ ~s|phx-click="intro_ready"|
     end
 
     test "permission denied during :intro routes to :permission_denied", %{conn: conn} do
@@ -246,7 +306,10 @@ defmodule InterviewWeb.CaptureLiveTest do
       %{session: session} = graph!(%{session: %{state: "pending"}})
       {:ok, view, _html} = live(conn, capture_path(session))
 
-      # Walk: :intro → click I'm ready → :prep → deny → :permission_denied → retry → :prep.
+      # Walk: :intro → permission granted → click I'm ready → :prep →
+      # then a later permission flip to denied → :permission_denied →
+      # retry → :prep.
+      render_hook(view, "permission", %{"state" => "granted"})
       view |> element("button", "I'm ready") |> render_click()
       render_hook(view, "permission", %{"state" => "denied"})
       assert :sys.get_state(view.pid).socket.assigns.phase == :permission_denied
@@ -267,15 +330,18 @@ defmodule InterviewWeb.CaptureLiveTest do
       refute html =~ ~s|data-action="release"|
     end
 
-    test "intro_ready re-pushes set_question + auth_acked for the just-mounted hook",
+    test "intro_ready re-pushes set_question + auth_acked for the recorder hook",
          %{conn: conn} do
-      # mount_authenticated pushes both events on initial mount, but the
-      # recorder hook isn't in the DOM yet during :intro. When the
-      # candidate clicks I'm ready, the LV must re-push so the freshly-
-      # mounted hook has question metadata + upload bearer.
+      # The recorder hook is now mounted during :intro (so the candidate
+      # can grant permission before the gate clears), so set_question
+      # and auth_acked emitted at mount_authenticated time already
+      # reach it. We still re-push from intro_ready defensively — a
+      # reconnect or hook remount between mount and the I'm-ready click
+      # could otherwise leave the hook without question metadata.
       %{session: session} = graph!(%{session: %{state: "pending"}})
       {:ok, view, _html} = live(conn, capture_path(session))
 
+      render_hook(view, "permission", %{"state" => "granted"})
       view |> element("button", "I'm ready") |> render_click()
 
       assert_push_event(view, "set_question", %{questionIndex: _, maxAnswerSeconds: _})
@@ -287,7 +353,8 @@ defmodule InterviewWeb.CaptureLiveTest do
   describe "think-time + recording countdowns" do
     test "renders the think-time phrase when the question has think_time_seconds",
          %{conn: conn} do
-      %{session: session} = graph!(%{question: %{think_time_seconds: 30}})
+      %{session: session, question: question} = graph!(%{question: %{think_time_seconds: 30}})
+      seed_existing_response!(session, question)
       {:ok, _view, html} = live(conn, capture_path(session))
 
       assert html =~ ~s|phx-hook="ThinkTimeCountdown"|
@@ -297,7 +364,8 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "does NOT render the think-time phrase when think_time_seconds is nil/0",
          %{conn: conn} do
-      %{session: session} = graph!(%{question: %{think_time_seconds: 0}})
+      %{session: session, question: question} = graph!(%{question: %{think_time_seconds: 0}})
+      seed_existing_response!(session, question)
       {:ok, _view, html} = live(conn, capture_path(session))
 
       refute html =~ ~s|phx-hook="ThinkTimeCountdown"|
@@ -306,7 +374,8 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "renders the recording-countdown overlay element inside the preview frame",
          %{conn: conn} do
-      %{session: session} = graph!(%{question: %{max_answer_seconds: 90}})
+      %{session: session, question: question} = graph!(%{question: %{max_answer_seconds: 90}})
+      seed_existing_response!(session, question)
       {:ok, _view, html} = live(conn, capture_path(session))
 
       assert html =~ ~s|data-role="recording-countdown"|
@@ -333,6 +402,7 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "advance walks through every question, then lands on review", ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
       assert render(view) =~ "Question 1 of 3"
 
       simulate_answer(view, ctx.session, ctx.q1, attempt: 1, capture_id: "cap-q1-a1")
@@ -353,6 +423,7 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "skip on a required question is rejected", ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
       render_click(view, "skip")
       html = render(view)
       assert html =~ "Question 1 of 3"
@@ -361,6 +432,7 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "retake creates a new attempt and supersedes the prior on ready", ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
 
       simulate_answer(view, ctx.session, ctx.q1, attempt: 1, capture_id: "cap-q1-a1")
 
@@ -382,6 +454,7 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "retake is blocked once max_attempts is reached", ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
 
       simulate_answer(view, ctx.session, ctx.q1, attempt: 1, capture_id: "cap-q1-a1")
       render_click(view, "retake")
@@ -395,6 +468,7 @@ defmodule InterviewWeb.CaptureLiveTest do
 
     test "submit refuses when a required question is unanswered", ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
 
       simulate_answer(view, ctx.session, ctx.q1, attempt: 1, capture_id: "cap-q1-a1")
       render_click(view, "advance")
@@ -415,6 +489,7 @@ defmodule InterviewWeb.CaptureLiveTest do
     test "submit promotes the session to submitted then ready once finalizers run",
          ctx do
       {:ok, view, _html} = live(ctx.conn, capture_path(ctx.session))
+      accept_intro!(view)
 
       simulate_answer(view, ctx.session, ctx.q1, attempt: 1, capture_id: "cap-q1-a1")
       render_click(view, "advance")
