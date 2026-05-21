@@ -142,6 +142,7 @@ const Recorder = {
       }
 
       case "recorder_started":
+        this.state.startInFlight = false;
         this.startRecordingCountdown();
         this.pushEvent("recorder_started", payload);
         // Notify other hooks (e.g. ThinkTimeCountdown's idle timer)
@@ -152,6 +153,7 @@ const Recorder = {
         break;
 
       case "recorder_stopped":
+        this.state.startInFlight = false;
         this.stopRecordingCountdown();
         this.setActionDisabled("start", false);
         this.pushEvent("recorder_stopped", payload);
@@ -184,6 +186,7 @@ const Recorder = {
         break;
 
       case "recorder_error":
+        this.state.startInFlight = false;
         this.pushEvent("recorder_error", payload);
         break;
 
@@ -308,6 +311,16 @@ const Recorder = {
 
   startRecording() {
     if (!this.core) return;
+    // Single-flight guard. The auto-start handoff from ThinkTimeCountdown
+    // can race the candidate's manual Record click within the same
+    // 200ms window, producing TWO claim_instance pushes with different
+    // captureInstanceIds for the same attempt. The server treats that
+    // as a takeover and fences the first claim — recording never
+    // actually starts. Guard at the top so the second caller is a no-op.
+    if (this.state.startInFlight) return;
+    if (this.core.recorder && this.core.recorder.state !== "inactive") return;
+    this.state.startInFlight = true;
+
     this.state.captureInstanceId = uuid();
     this.state.responseId = null;
     this.state.tusUrl = null;
@@ -325,6 +338,7 @@ const Recorder = {
       },
       (reply) => {
         if (!reply || !reply.ok) {
+          this.state.startInFlight = false;
           this.setActionDisabled("start", false);
           this.pushEvent("recorder_error", {
             code: "claim_failed",

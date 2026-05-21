@@ -128,6 +128,11 @@ defmodule InterviewWeb.CaptureLive do
       |> assign(:capture_complete_acked, false)
       |> assign(:bitrate_step, 0)
       |> assign(:think_time_remaining, nil)
+      # Monotonic id bumped on retake / question advance so the
+      # ThinkTimeCountdown hook (whose root span has phx-update="ignore")
+      # remounts with a fresh data-think-seconds read instead of
+      # reusing the previous attempt's already-expired timer.
+      |> assign(:think_time_key, 1)
       |> assign(:last_recording_duration_ms, nil)
       |> assign(:too_short, false)
       |> assign(:submit_error, nil)
@@ -542,6 +547,7 @@ defmodule InterviewWeb.CaptureLive do
            |> assign(:bytes_uploaded, 0)
            |> assign(:response_id, nil)
            |> assign(:capture_instance_id, nil)
+           |> update(:think_time_key, &(&1 + 1))
            |> push_set_question(used + 1)}
         end
     end
@@ -1047,7 +1053,7 @@ defmodule InterviewWeb.CaptureLive do
       <%= if @phase == :prep and @current_question.think_time_seconds && @current_question.think_time_seconds > 0 do %>
         <p class="font-display italic text-[14.5px] leading-[1.6] text-base-content/70 max-w-[44ch] think-time-phrase">
           <span
-            id={"think-time-#{@current_index}-#{@current_question.id}"}
+            id={"think-time-#{@current_index}-#{@current_question.id}-#{@think_time_key}"}
             phx-hook="ThinkTimeCountdown"
             phx-update="ignore"
             data-think-seconds={@current_question.think_time_seconds}
@@ -1183,9 +1189,19 @@ defmodule InterviewWeb.CaptureLive do
         Picked up <em class="italic font-light text-primary">elsewhere</em>.
       </h2>
       <p class="text-[15px] leading-[1.65] text-base-content/75 max-w-[44ch]">
-        Another tab or window took over this interview.
-        Continue there, or reload to resume here.
+        Another tab or window took over this interview, or your connection
+        blipped at a bad moment. Reload this page to resume.
       </p>
+      <div class="pt-2">
+        <button
+          type="button"
+          onclick="window.location.reload()"
+          class="zen-link text-base-content text-[15px]"
+        >
+          <span class="zen-arrow" aria-hidden="true">↺</span>
+          <span>Reload and continue</span>
+        </button>
+      </div>
     </section>
     """
   end
