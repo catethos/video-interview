@@ -93,25 +93,40 @@ rest. Not built in v1.)
 
 ## Candidate capture flow — driven by `display_order`
 
-Today `capture_live.ex` builds its working list with
-`Capture.list_questions/1` (template questions ordered by `position`) and
-navigates by template position.
+This is smaller than it first looks. `capture_live.ex` navigates by
+`current_question = Enum.at(questions, current_index)` and advances with
+`current_index + 1` — pure index into the assigned `questions` list. The
+capture fence sends `questionIndex: q.position` and resolves it with
+`fetch_question_by_position/2`, but `q.position` is **intrinsic to the
+question**, not its slot — so it keeps resolving correctly no matter the
+display order.
 
-Change: the candidate's sequence comes from the session's `display_order`.
+So the core change is one line: build the `questions` list in **display
+order** instead of template order.
 
 - New context fn `Capture.list_questions_in_display_order/1` — joins
   `session_questions` (ordered by `coalesce(display_order, position)`) to
   `template_question`, returning the template `%Question{}`s in the
-  candidate's order.
-- `capture_live` uses that list. "Question N of M", think-time, recording,
-  and next/advance all walk this display-ordered list.
+  candidate's order. `capture_live` mount uses this instead of
+  `list_questions/1`. `ensure_session_questions/1` already runs immediately
+  before, so the order exists.
 - Each captured answer is still tied to its `template_question`
   (`response.template_question_id`), so the question's identity — and
-  therefore scoring, report, and retake tracking — is independent of which
-  slot it was shown in.
+  therefore scoring, report, retake tracking, and the fence — is independent
+  of which slot it was shown in.
 
-When the flag is off, `display_order == position`, so the list is identical to
-today: **zero behavioural change in the default case.**
+**Candidate-facing numbering.** The recording screen already shows
+`Question {current_index + 1} of {total}` — a *display* index — so it's
+correct under randomization with no change. The **review screen** is the one
+exception: it numbers the list by `q.position` (the template number), which
+would read out of order (`Q03, Q01, Q02`) and leak the template order. Fix:
+number it by the display ordinal (`Enum.with_index/2`) to match the recording
+screen. Net: candidates always see a clean sequential `1..M` in the order they
+were shown; no template numbers leak.
+
+When the flag is off, `display_order` is assigned in template order, so the
+sequence is identical to today: **zero behavioural change in the default
+case.**
 
 ## Recruiter UI
 
@@ -157,8 +172,9 @@ Changed:
 - `lib/interview/capture/session_question.ex` — field + cast.
 - `lib/interview/capture.ex` — `ensure_session_questions/1` (shuffle) +
   `list_questions_in_display_order/1`.
-- `lib/interview_web/live/capture_live.ex` — drive the question list off the
-  display order.
+- `lib/interview_web/live/capture_live.ex` — build the `questions` list from
+  `list_questions_in_display_order/1`; number the review screen by display
+  ordinal (`Enum.with_index/2`) instead of `q.position`.
 - `lib/interview_web/live/recruiter_template_live.ex` — the checkbox.
 - `lib/interview_web/live/recruiter_session_live.ex` — "Shown order" line in
   the debug panel.
@@ -171,7 +187,8 @@ Changed:
   flag on → `display_order` is a permutation of `1..N`; second call does **not**
   reshuffle (idempotent).
 - `list_questions_in_display_order` returns questions in `display_order`.
-- `capture_live` serves questions in the session's `display_order`.
+- `capture_live` serves questions in the session's `display_order`; the review
+  screen numbers by display ordinal (not `q.position`).
 - **Isolation:** for a randomized session, `ScoringExport.build/2` and
   `Playback.get_session/2` still return canonical (`template_question.position`)
   order — the keystone test that proves scoring/report are unaffected.

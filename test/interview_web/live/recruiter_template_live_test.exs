@@ -78,6 +78,21 @@ defmodule InterviewWeb.RecruiterTemplateLiveTest do
            "expected mode 'last' to persist, got: #{inspect(reloaded.retake_policy)}"
   end
 
+  test "toggling randomize persists on the draft version", %{conn: conn, template: template} do
+    {:ok, view, _html} = live(conn, ~p"/recruiter/templates/#{template.id}")
+
+    %{draft_version: draft} = Templates.get_template_with_current_version(template.id)
+    assert draft
+    refute draft.randomize_questions
+
+    view
+    |> form(~s|form[phx-change="update_randomize"]|, %{"randomize_questions" => "true"})
+    |> render_change()
+
+    reloaded = Interview.Repo.get!(Interview.Templates.Version, draft.id)
+    assert reloaded.randomize_questions == true
+  end
+
   test "reorder via move event persists", %{conn: conn, template: template} do
     {:ok, view, _html} = live(conn, ~p"/recruiter/templates/#{template.id}")
     %{draft_version: draft} = Templates.get_template_with_current_version(template.id)

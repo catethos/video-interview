@@ -8,6 +8,9 @@ defmodule Interview.Templates.Version do
   schema "interview_template_versions" do
     field :version_number, :integer
     field :retake_policy, :map, default: %{"max_attempts" => 1, "mode" => "first_only"}
+    # When true, each candidate sees the questions in their own shuffled order
+    # (canonical template order still drives scoring + the recruiter report).
+    field :randomize_questions, :boolean, default: false
     field :published_at, :utc_datetime_usec
     field :published_by, :string
     # Deep-link handoff context: when this draft was created from an
@@ -34,7 +37,8 @@ defmodule Interview.Templates.Version do
       :published_at,
       :published_by,
       :external_return_url,
-      :external_return_state
+      :external_return_state,
+      :randomize_questions
     ])
     |> validate_required([:template_id, :version_number])
     |> unique_constraint([:template_id, :version_number])
