@@ -70,7 +70,8 @@ config :interview, Oban,
     finalize: 1,
     sweeper: 1,
     webhook: 5,
-    transcript: 2
+    transcript: 2,
+    scoring: 2
   ],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
