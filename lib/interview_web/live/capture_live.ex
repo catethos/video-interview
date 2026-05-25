@@ -125,7 +125,10 @@ defmodule InterviewWeb.CaptureLive do
 
   defp mount_authenticated(socket, %Session{} = session, connected? \\ true) do
     Capture.ensure_session_questions(session)
-    questions = Capture.list_questions(session)
+    # The candidate walks the per-session display order (a frozen shuffle when
+    # the version randomizes; template order otherwise). Scoring + the
+    # recruiter report still use the canonical template_question.position.
+    questions = Capture.list_questions_in_display_order(session)
     version = Capture.get_template_version!(session)
     prompt_asset_kinds = load_prompt_asset_kinds(questions)
 
@@ -1215,10 +1218,10 @@ defmodule InterviewWeb.CaptureLive do
       </div>
 
       <ul class="divide-y divide-base-content/10">
-        <%= for {q, status} <- @review_items do %>
+        <%= for {{q, status}, idx} <- Enum.with_index(@review_items, 1) do %>
           <li class="grid grid-cols-[3rem_1fr_max-content] gap-5 py-4 items-baseline">
             <span class="font-display italic text-[1.25rem] text-base-content/40 tabular-nums leading-none">
-              {q.position |> Integer.to_string() |> String.pad_leading(2, "0")}
+              {idx |> Integer.to_string() |> String.pad_leading(2, "0")}
             </span>
             <div class="space-y-1 min-w-0">
               <p class="text-[14.5px] leading-[1.45] truncate">
