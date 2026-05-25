@@ -29,6 +29,11 @@ defmodule Interview.Webhooks do
     * `session.failed`    — `reason` (caller-supplied).
     * `session.deleted`   — `reason` (caller-supplied; "retention" |
       "user_request").
+    * `session.scored`    — full scoring payload from the worker
+      (classifications, pipeline_outputs, interview_transcript). See
+      `docs/scoring-webhook-contract.md` §4.
+    * `session.scoring_failed` — `pipeline_version`, `stage`, `reason`,
+      `message`, `attempts`. Contract §5.
   """
   import Ecto.Query, warn: false
 
@@ -57,7 +62,9 @@ defmodule Interview.Webhooks do
              "session.submitted",
              "session.ready",
              "session.failed",
-             "session.deleted"
+             "session.deleted",
+             "session.scored",
+             "session.scoring_failed"
            ] do
     case Repo.get(Tenant, session.tenant_id) do
       nil ->
@@ -150,6 +157,11 @@ defmodule Interview.Webhooks do
   defp derive_data("session.failed", _session, extra), do: stringify(extra)
   defp derive_data("session.deleted", _session, extra), do: stringify(extra)
 
+  # The scoring worker builds the full `data` payload (contract §4/§5); we
+  # pass it through verbatim. See docs/scoring-webhook-contract.md.
+  defp derive_data("session.scored", _session, extra), do: stringify(extra)
+  defp derive_data("session.scoring_failed", _session, extra), do: stringify(extra)
+
   defp count_selected_responses(session_id) do
     Repo.one(
       from sq in SessionQuestion,
@@ -193,7 +205,15 @@ defmodule Interview.Webhooks do
   end
 
   @doc "List the webhook event types we emit. Used for documentation/tests."
-  def event_types, do: ["session.submitted", "session.ready", "session.failed", "session.deleted"]
+  def event_types,
+    do: [
+      "session.submitted",
+      "session.ready",
+      "session.failed",
+      "session.deleted",
+      "session.scored",
+      "session.scoring_failed"
+    ]
 
   @doc "Current payload schema version emitted in the `v` field."
   def payload_version, do: @payload_version

@@ -261,6 +261,52 @@ defmodule Interview.WebhooksTest do
 
       assert d.payload["data"]["reason"] == "finalizer_giveup"
     end
+
+    test "session.scored passes the worker-built scoring payload through" do
+      tenant = configured_tenant!()
+      session = session_for(tenant)
+
+      data = %{
+        "pipeline_version" => "smoke_test_Pipeline_2_2026-05-25",
+        "classifications" => [%{"question_number" => 1, "question_type" => "behavioral"}],
+        "pipeline_outputs" => %{"p3" => [%{"question_number" => 1}]}
+      }
+
+      {:ok, %Delivery{} = d} = Webhooks.enqueue(session, "session.scored", data)
+
+      assert d.event_type == "session.scored"
+      assert d.payload["type"] == "session.scored"
+      assert d.payload["data"]["pipeline_version"] == "smoke_test_Pipeline_2_2026-05-25"
+
+      assert d.payload["data"]["classifications"] == [
+               %{"question_number" => 1, "question_type" => "behavioral"}
+             ]
+    end
+
+    test "session.scoring_failed passes stage + reason + attempts through" do
+      tenant = configured_tenant!()
+      session = session_for(tenant)
+
+      data = %{
+        "pipeline_version" => "smoke_test_Pipeline_2_2026-05-25",
+        "stage" => "p3",
+        "reason" => "rate_limited",
+        "message" => "429 after 6 attempts",
+        "attempts" => 6
+      }
+
+      {:ok, %Delivery{} = d} = Webhooks.enqueue(session, "session.scoring_failed", data)
+
+      assert d.payload["type"] == "session.scoring_failed"
+      assert d.payload["data"]["reason"] == "rate_limited"
+      assert d.payload["data"]["stage"] == "p3"
+      assert d.payload["data"]["attempts"] == 6
+    end
+
+    test "event_types/0 lists the two scoring events" do
+      assert "session.scored" in Webhooks.event_types()
+      assert "session.scoring_failed" in Webhooks.event_types()
+    end
   end
 
   describe "stale in_flight recovery" do
