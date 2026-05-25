@@ -168,4 +168,181 @@ defmodule Interview.Scoring do
         false
     end
   end
+
+  @doc """
+  Score a finalized session end-to-end and return the `session.scored`
+  webhook `data` payload (contract §4). Does NOT write `session_scores` or
+  enqueue the webhook — the worker does both, so it can branch on success vs
+  failure.
+
+  Resolves P1 from the cache (computing + caching it under the advisory lock
+  on a miss), runs P2-P5 with the cached P1 bound as `p1_results`, then
+  assembles the payload. Returns `{:error, :not_ready}` when the session
+  isn't finalized yet (the worker snoozes and retries).
+  """
+  @spec score_session(Ecto.UUID.t()) :: {:ok, map()} | {:error, term()}
+  def score_session(session_id) do
+    with {:ok, session} <- fetch_session(session_id),
+         {:ok, export} <- ScoringExport.build(session.tenant_id, session_id),
+         input_row = build_input_row(session, export),
+         {:ok, p1_rows, provider} <- resolve_p1(session.template_version_id, input_row),
+         {:ok, %{stage_outputs: stage_outputs}} <-
+           PipelineRunner.run_pipeline(topology(), input_row,
+             prebound: %{"p1_results" => p1_rows}
+           ) do
+      {:ok, build_scored_payload(p1_rows, provider, stage_outputs, export)}
+    end
+  end
+
+  defp fetch_session(session_id) do
+    case Repo.get(Session, session_id) do
+      %Session{} = session -> {:ok, session}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  defp build_input_row(%Session{} = session, export) do
+    %{
+      "custom_id" => session.id,
+      "template_version_id" => session.template_version_id,
+      "job_role" => session.job_role || "",
+      "job_description" => session.job_description || "",
+      "candidate_name" => "",
+      "candidate_email" => session.candidate_email || "",
+      "interview_transcript" => Jason.encode!(pipeline_transcript(export))
+    }
+  end
+
+  # The pipeline only needs the Q+A trio; the .lat SQL parses this string.
+  defp pipeline_transcript(export) do
+    Enum.map(export.interview_transcript, fn q ->
+      %{
+        "question_number" => q.question_number,
+        "question_text" => q.question_text,
+        "answer_text" => q.answer_text
+      }
+    end)
+  end
+
+  # Cache hit → reuse. Miss → compute under the advisory lock, re-checking
+  # inside it so a racing worker that just populated the cache wins without a
+  # second LLM call.
+  defp resolve_p1(template_version_id, input_row) do
+    pipeline_version = pipeline_version()
+
+    case get_classification(template_version_id, pipeline_version) do
+      %TemplateClassification{result: %{"rows" => rows}, provider: provider} ->
+        {:ok, rows, provider}
+
+      nil ->
+        compute_and_cache_p1(template_version_id, input_row, pipeline_version)
+    end
+  end
+
+  defp compute_and_cache_p1(template_version_id, input_row, pipeline_version) do
+    template_version_id
+    |> with_classification_lock(fn ->
+      case get_classification(template_version_id, pipeline_version) do
+        %TemplateClassification{result: %{"rows" => rows}, provider: provider} ->
+          {rows, provider}
+
+        nil ->
+          case classify(input_row) do
+            {:ok, %{result: %{"rows" => rows} = result, provider: provider}} ->
+              {:ok, _} =
+                upsert_classification(%{
+                  template_version_id: template_version_id,
+                  pipeline_version: pipeline_version,
+                  provider: provider,
+                  result: result,
+                  computed_at: DateTime.utc_now()
+                })
+
+              {rows, provider}
+
+            {:error, reason} ->
+              Repo.rollback(reason)
+          end
+      end
+    end)
+    |> case do
+      {:ok, {rows, provider}} -> {:ok, rows, provider}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_scored_payload(p1_rows, provider, stage_outputs, export) do
+    %{
+      "pipeline_version" => pipeline_version(),
+      "scored_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "classification_provider" => provider,
+      "classifications" => classifications_from(p1_rows),
+      "pipeline_outputs" => %{
+        "p2" => p2_output(stage_outputs["p2"]),
+        "p3" =>
+          per_question(
+            stage_outputs["p3"],
+            ~w(clarity_coherence relevance_completeness support_quality)
+          ),
+        "p4" => per_question(stage_outputs["p4"], ~w(layer2_scores)),
+        "p5" => p5_output(stage_outputs["p5"])
+      },
+      "interview_transcript" => webhook_transcript(export)
+    }
+  end
+
+  defp classifications_from([row | _]), do: decode_maybe(row["classifications"])
+  defp classifications_from(_), do: []
+
+  defp p2_output([row | _]),
+    do: %{"question_evidences" => decode_maybe(row["question_evidences"])}
+
+  defp p2_output(_), do: %{"question_evidences" => []}
+
+  defp p5_output([row | _]) do
+    %{
+      "overall_insights" => decode_maybe(row["overall_insights"]),
+      "question_level_evaluation" => decode_maybe(row["question_level_evaluation"])
+    }
+  end
+
+  defp p5_output(_), do: %{"overall_insights" => [], "question_level_evaluation" => []}
+
+  # Per-question stages (p3/p4): one entry per question, each carrying
+  # question_number (which ProcessData passes through) plus the decoded score
+  # fields. Joinable to interview_transcript + classifications.
+  defp per_question(rows, fields) when is_list(rows) do
+    Enum.map(rows, fn row ->
+      Enum.reduce(fields, %{"question_number" => row["question_number"]}, fn field, acc ->
+        Map.put(acc, field, decode_maybe(row[field]))
+      end)
+    end)
+  end
+
+  defp per_question(_, _), do: []
+
+  defp webhook_transcript(export) do
+    Enum.map(export.interview_transcript, fn q ->
+      %{
+        "question_number" => q.question_number,
+        "question_text" => q.question_text,
+        "answer_text" => q.answer_text,
+        "response_id" => q.response_id,
+        "duration_ms" => q.duration_ms,
+        "focus_lost_count" => q.focus_lost_count,
+        "focus_lost_total_ms" => q.focus_lost_total_ms
+      }
+    end)
+  end
+
+  # Stage outputs may arrive as JSON strings (the DuckDB serialization quirk)
+  # or as already-decoded maps/lists; normalize to real JSON either way.
+  defp decode_maybe(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} -> decoded
+      {:error, _} -> value
+    end
+  end
+
+  defp decode_maybe(value), do: value
 end

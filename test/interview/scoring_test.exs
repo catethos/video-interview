@@ -121,17 +121,185 @@ defmodule Interview.ScoringTest do
     end
   end
 
-  defp ready_session_with_transcript!(tenant_id) do
+  describe "score_session/1" do
+    # Stage outputs in the shape the lattice runner returns: per-question
+    # stages (p3/p4) carry question_number from ProcessData; leaf scores are
+    # JSON strings (decoded on assembly).
+    defp program_full_pipeline! do
+      PipelineRunnerStub.program(%{
+        "p1" =>
+          {:ok,
+           [
+             %{
+               "classifications" =>
+                 Jason.encode!([
+                   %{
+                     "question_number" => 1,
+                     "question_type" => "behavioral",
+                     "target_constructs" => ["Adaptability"]
+                   }
+                 ])
+             }
+           ]},
+        "p2" =>
+          {:ok,
+           [
+             %{
+               "question_evidences" =>
+                 Jason.encode!([%{"question_number" => 1, "evidence" => %{"actions" => ["x"]}}])
+             }
+           ]},
+        "p3" =>
+          {:ok,
+           [
+             %{
+               "question_number" => 1,
+               "clarity_coherence" => Jason.encode!(%{"score" => 4, "justification" => "clear"}),
+               "relevance_completeness" =>
+                 Jason.encode!(%{"score" => 3, "justification" => "ok"}),
+               "support_quality" => Jason.encode!(%{"score" => 3, "justification" => "ok"})
+             }
+           ]},
+        "p4" =>
+          {:ok,
+           [
+             %{
+               "question_number" => 1,
+               "layer2_scores" =>
+                 Jason.encode!(%{
+                   "action_effectiveness" => %{"score" => 4, "justification" => "good"}
+                 })
+             }
+           ]},
+        "p5" =>
+          {:ok,
+           [
+             %{
+               "overall_insights" => Jason.encode!(["solid technical example"]),
+               "question_level_evaluation" =>
+                 Jason.encode!([%{"question_number" => 1, "overall_scoring_rationale" => "r"}])
+             }
+           ]}
+      })
+    end
+
+    test "assembles the full webhook data payload per the contract" do
+      tenant = Fixtures.tenant!()
+
+      %{session: session} =
+        ready_session_with_transcript!(tenant.id, %{
+          job_role: "MT - Data",
+          job_description: "Drives data projects."
+        })
+
+      program_full_pipeline!()
+
+      assert {:ok, data} = Scoring.score_session(session.id)
+
+      assert data["pipeline_version"] == "smoke_test_Pipeline_2_2026-05-25"
+      assert is_binary(data["scored_at"])
+
+      # P1 classifications, decoded from the JSON-string leaf
+      assert data["classifications"] == [
+               %{
+                 "question_number" => 1,
+                 "question_type" => "behavioral",
+                 "target_constructs" => ["Adaptability"]
+               }
+             ]
+
+      outs = data["pipeline_outputs"]
+
+      assert outs["p2"]["question_evidences"] == [
+               %{"question_number" => 1, "evidence" => %{"actions" => ["x"]}}
+             ]
+
+      # p3/p4 are per-question arrays, each carrying question_number, scores decoded
+      assert [%{"question_number" => 1, "clarity_coherence" => %{"score" => 4}}] = outs["p3"]
+
+      assert [
+               %{
+                 "question_number" => 1,
+                 "layer2_scores" => %{"action_effectiveness" => %{"score" => 4}}
+               }
+             ] =
+               outs["p4"]
+
+      assert outs["p5"]["overall_insights"] == ["solid technical example"]
+
+      # transcript mirrors the export (string keys)
+      assert [%{"question_number" => 1, "answer_text" => _}] = data["interview_transcript"]
+
+      # cache miss → P1 ran and was cached
+      assert PipelineRunnerStub.calls() |> Enum.map(& &1.stage_id) == ~w(p1 p2 p3 p4 p5)
+
+      assert Scoring.get_classification(
+               session.template_version_id,
+               "smoke_test_Pipeline_2_2026-05-25"
+             )
+    end
+
+    test "reuses a cached classification instead of re-running P1" do
+      tenant = Fixtures.tenant!()
+      %{session: session} = ready_session_with_transcript!(tenant.id)
+
+      {:ok, _} =
+        Scoring.upsert_classification(%{
+          template_version_id: session.template_version_id,
+          pipeline_version: Scoring.pipeline_version(),
+          provider: "google/gemini-2.5-flash",
+          result: %{
+            "rows" => [
+              %{
+                "classifications" =>
+                  Jason.encode!([%{"question_number" => 1, "question_type" => "behavioral"}])
+              }
+            ]
+          },
+          computed_at: DateTime.utc_now()
+        })
+
+      # No p1 programmed — if it ran, the stub default would fire and p1 would
+      # appear in calls. It must not.
+      PipelineRunnerStub.program(%{
+        "p2" => {:ok, [%{"question_evidences" => "[]"}]},
+        "p3" => {:ok, [%{"question_number" => 1}]},
+        "p4" => {:ok, [%{"question_number" => 1}]},
+        "p5" => {:ok, [%{"overall_insights" => "[]", "question_level_evaluation" => "[]"}]}
+      })
+
+      assert {:ok, data} = Scoring.score_session(session.id)
+      assert data["classification_provider"] == "google/gemini-2.5-flash"
+
+      assert data["classifications"] == [
+               %{"question_number" => 1, "question_type" => "behavioral"}
+             ]
+
+      assert PipelineRunnerStub.calls() |> Enum.map(& &1.stage_id) == ~w(p2 p3 p4 p5)
+    end
+
+    test "returns :not_ready when the session is not finalized" do
+      {tenant, _tpl, v} = version!()
+      session = Fixtures.session!(tenant.id, v.id, %{state: "in_progress"})
+      assert {:error, :not_ready} = Scoring.score_session(session.id)
+    end
+  end
+
+  defp ready_session_with_transcript!(tenant_id, session_attrs \\ %{}) do
     template = Fixtures.template!(tenant_id, %{name: "Acme SDR"})
     version = Fixtures.version!(template.id, %{version_number: 1})
     q1 = Fixtures.question!(version.id, 1, %{prompt_text: "Tell me about a time…"})
     {:ok, _} = Templates.publish_draft(version)
 
     session =
-      Fixtures.session!(tenant_id, version.id, %{
-        state: "ready",
-        completed_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
-      })
+      Fixtures.session!(
+        tenant_id,
+        version.id,
+        Map.merge(
+          %{state: "ready", completed_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)},
+          session_attrs
+        )
+      )
 
     now = DateTime.utc_now()
 
