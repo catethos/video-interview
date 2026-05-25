@@ -190,7 +190,7 @@ defmodule Interview.Scoring do
            PipelineRunner.run_pipeline(topology(), input_row,
              prebound: %{"p1_results" => p1_rows}
            ) do
-      {:ok, build_scored_payload(p1_rows, provider, stage_outputs, export)}
+      {:ok, build_scored_payload(session, p1_rows, provider, stage_outputs, export)}
     end
   end
 
@@ -271,11 +271,15 @@ defmodule Interview.Scoring do
     end
   end
 
-  defp build_scored_payload(p1_rows, provider, stage_outputs, export) do
+  defp build_scored_payload(%Session{} = session, p1_rows, provider, stage_outputs, export) do
     %{
       "pipeline_version" => pipeline_version(),
       "scored_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "classification_provider" => provider,
+      # Frozen snapshot of the job context the pipeline ran against (job_role
+      # feeds P1; job_description feeds P2-P5). Travels with the score so the
+      # record is self-describing even if the consumer later edits the job.
+      "job_context" => %{"role" => session.job_role, "description" => session.job_description},
       "classifications" => classifications_from(p1_rows),
       "pipeline_outputs" => %{
         "p2" => p2_output(stage_outputs["p2"]),

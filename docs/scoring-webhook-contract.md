@@ -128,6 +128,7 @@ rewrite.
 | `pipeline_version` | string | Which pipeline build produced these scores. The consumer keys its stored record on this and can detect schema drift ("these scores came from an older pipeline; re-render or re-request"). Mirrors `session_scores.pipeline_version`. See §12.1 — its canonical source in the bundle is an open implementation detail. |
 | `scored_at` | ISO 8601 | When the pipeline finished, from `session_scores.computed_at`. Within milliseconds of envelope `occurred_at` on first delivery (the two are stamped by separate `utc_now/0` calls in the same transaction, so they're close but not bit-identical); kept as a separate **domain** timestamp so the score record is self-describing independent of envelope/transport concerns. |
 | `classification_provider` | string \| null | The model that produced P1, from `template_classifications.provider`. **`null` in v1** — the model lives inside the `.lat`, not the topology, so the runner does not surface it yet (the example below shows the populated shape for when it lands). Per-stage provenance for P2–P5 is likewise not recorded (§12.4). |
+| `job_context` | object | A **frozen snapshot** of the job the pipeline scored against: `{"role": string\|null, "description": string\|null}`, from `sessions.job_role` / `sessions.job_description` (the consumer-supplied context, captured at session creation). `role` drives P1; `description` drives P2–P5. Included so the score record is self-describing for audit even if the consumer later edits its own job record — same rationale as carrying `interview_transcript`. The consumer already owns this data, so it may ignore it. |
 | `classifications` | array | **P1 output.** Per-question classification, computed once per `template_version_id` and shared across every candidate on that template (the v2 fairness fix: P1 reads only the questions, never a candidate's answers). §4.2. |
 | `pipeline_outputs` | object | **P2–P5 output**, keyed by semantic stage (`"p2"`, `"p3"`, `"p4"`, `"p5"`). The per-question evidence and scores plus the session-level aggregate. §4.3. |
 | `interview_transcript` | array | The exact Q+A the scores were computed from. Byte-for-byte the shape of `GET /api/sessions/:id/scoring_export` (`ExternalIntegration.ScoringExport`). Pins what the scores describe and lets the consumer render the report without a second fetch. §4.4. |
@@ -421,6 +422,10 @@ bundle (truncated transcript text for readability):
     "pipeline_version": "smoke_test_Pipeline_2_2026-05-25-0423",
     "scored_at": "2026-05-25T04:31:07.412233Z",
     "classification_provider": "google/gemini-2.5-flash",
+    "job_context": {
+      "role": "Management Trainee - Data",
+      "description": "Drives data and process-improvement projects across functions under deadline."
+    },
     "classifications": [
       {
         "question_number": 1,

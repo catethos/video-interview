@@ -199,6 +199,12 @@ defmodule Interview.ScoringTest do
       assert data["pipeline_version"] == "smoke_test_Pipeline_2_2026-05-25"
       assert is_binary(data["scored_at"])
 
+      # Job context the scoring ran against — a frozen snapshot from the session.
+      assert data["job_context"] == %{
+               "role" => "MT - Data",
+               "description" => "Drives data projects."
+             }
+
       # P1 classifications, decoded from the JSON-string leaf
       assert data["classifications"] == [
                %{
