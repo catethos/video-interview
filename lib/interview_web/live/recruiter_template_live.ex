@@ -151,6 +151,19 @@ defmodule InterviewWeb.RecruiterTemplateLive do
     end
   end
 
+  # Checkbox in a phx-change form: present (checked) → true, absent → false.
+  def handle_event("update_randomize", params, socket) do
+    randomize = params["randomize_questions"] in ["true", "on"]
+
+    case Templates.update_draft_version(socket.assigns.draft, %{randomize_questions: randomize}) do
+      {:ok, updated} ->
+        {:noreply, socket |> assign(:draft, updated) |> stamp_saved()}
+
+      {:error, _cs} ->
+        {:noreply, put_flash(socket, :error, "Failed to update randomization")}
+    end
+  end
+
   defp maybe_set_retake(map, _key, nil), do: map
   defp maybe_set_retake(map, key, value), do: Map.put(map, key, value)
 
@@ -631,6 +644,19 @@ defmodule InterviewWeb.RecruiterTemplateLive do
                       last
                     </option>
                   </select>
+                </label>
+              </form>
+
+              <form phx-change="update_randomize" class="pt-5 max-w-md">
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="randomize_questions"
+                    value="true"
+                    checked={@draft.randomize_questions}
+                    class="checkbox checkbox-sm"
+                  />
+                  <span class="text-[14px]">Randomize question order for each candidate</span>
                 </label>
               </form>
             </div>
