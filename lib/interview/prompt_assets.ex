@@ -342,7 +342,46 @@ defmodule Interview.PromptAssets do
       %{prompt_asset_id: updated.id, tenant_id: updated.tenant_id}
     )
 
+    # Auto-caption: only for assets that actually carry audio. Whisper
+    # is gated behind the same `enabled?` flag the candidate-side
+    # transcripts use, so self-hosted deployments without an OpenAI
+    # key don't fire the job. Inserting into Oban is idempotent —
+    # the worker no-ops if caption_ready_at is already set.
+    if updated.kind in ["video", "audio"] and Interview.Transcripts.enabled?() do
+      _ =
+        %{prompt_asset_id: updated.id}
+        |> Interview.Workers.PromptAssetCaption.new()
+        |> Oban.insert()
+    end
+
     {:ok, updated}
+  end
+
+  @doc """
+  Stamp the caption artifacts onto a prompt_asset after the async
+  Whisper VTT job lands. Idempotent on `caption_ready_at` — a second
+  call with the same key/provider is a no-op.
+  """
+  def mark_caption_ready(asset_id, storage_key, provider)
+      when is_binary(asset_id) and is_binary(storage_key) and is_binary(provider) do
+    now = DateTime.utc_now()
+
+    {n, _} =
+      from(a in PromptAsset,
+        where: a.id == ^asset_id and is_nil(a.caption_ready_at)
+      )
+      |> Repo.update_all(
+        set: [
+          caption_storage_key: storage_key,
+          caption_provider: provider,
+          caption_ready_at: now
+        ]
+      )
+
+    case n do
+      1 -> :ok
+      0 -> :already_set
+    end
   end
 
   @doc """

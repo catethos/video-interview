@@ -8,6 +8,7 @@ defmodule Interview.WebhooksTest do
   alias Interview.Tenants.Tenant
   alias Interview.Webhooks
   alias Interview.Webhooks.Delivery
+  alias Interview.Workers.ScorePipeline
   alias Interview.Workers.WebhookDelivery
 
   defp configured_tenant!(opts \\ []) do
@@ -58,8 +59,11 @@ defmodule Interview.WebhooksTest do
       tenant = configured_tenant!()
       session = session_for(tenant)
 
-      {:ok, %Delivery{id: id, delivered_at: stamp}} = Webhooks.enqueue(session, "session.submitted")
-      {:ok, %Delivery{id: ^id, delivered_at: ^stamp}} = Webhooks.enqueue(session, "session.submitted")
+      {:ok, %Delivery{id: id, delivered_at: stamp}} =
+        Webhooks.enqueue(session, "session.submitted")
+
+      {:ok, %Delivery{id: ^id, delivered_at: ^stamp}} =
+        Webhooks.enqueue(session, "session.submitted")
 
       assert Repo.aggregate(Delivery, :count, :id) == 1
     end
@@ -258,6 +262,52 @@ defmodule Interview.WebhooksTest do
 
       assert d.payload["data"]["reason"] == "finalizer_giveup"
     end
+
+    test "session.scored passes the worker-built scoring payload through" do
+      tenant = configured_tenant!()
+      session = session_for(tenant)
+
+      data = %{
+        "pipeline_version" => "smoke_test_Pipeline_2_2026-05-25",
+        "classifications" => [%{"question_number" => 1, "question_type" => "behavioral"}],
+        "pipeline_outputs" => %{"p3" => [%{"question_number" => 1}]}
+      }
+
+      {:ok, %Delivery{} = d} = Webhooks.enqueue(session, "session.scored", data)
+
+      assert d.event_type == "session.scored"
+      assert d.payload["type"] == "session.scored"
+      assert d.payload["data"]["pipeline_version"] == "smoke_test_Pipeline_2_2026-05-25"
+
+      assert d.payload["data"]["classifications"] == [
+               %{"question_number" => 1, "question_type" => "behavioral"}
+             ]
+    end
+
+    test "session.scoring_failed passes stage + reason + attempts through" do
+      tenant = configured_tenant!()
+      session = session_for(tenant)
+
+      data = %{
+        "pipeline_version" => "smoke_test_Pipeline_2_2026-05-25",
+        "stage" => "p3",
+        "reason" => "rate_limited",
+        "message" => "429 after 6 attempts",
+        "attempts" => 6
+      }
+
+      {:ok, %Delivery{} = d} = Webhooks.enqueue(session, "session.scoring_failed", data)
+
+      assert d.payload["type"] == "session.scoring_failed"
+      assert d.payload["data"]["reason"] == "rate_limited"
+      assert d.payload["data"]["stage"] == "p3"
+      assert d.payload["data"]["attempts"] == 6
+    end
+
+    test "event_types/0 lists the two scoring events" do
+      assert "session.scored" in Webhooks.event_types()
+      assert "session.scoring_failed" in Webhooks.event_types()
+    end
   end
 
   describe "stale in_flight recovery" do
@@ -331,7 +381,13 @@ defmodule Interview.WebhooksTest do
   describe "circuit breaker" do
     setup do
       prev = Application.get_env(:interview, Interview.Webhooks, [])
-      Application.put_env(:interview, Interview.Webhooks, Keyword.put(prev, :circuit_breaker_threshold, 3))
+
+      Application.put_env(
+        :interview,
+        Interview.Webhooks,
+        Keyword.put(prev, :circuit_breaker_threshold, 3)
+      )
+
       on_exit(fn -> Application.put_env(:interview, Interview.Webhooks, prev) end)
       :ok
     end
@@ -400,6 +456,22 @@ defmodule Interview.WebhooksTest do
         |> Enum.sort()
 
       assert events == ["session.ready", "session.submitted"]
+    end
+
+    test "also enqueues ScorePipeline when the session becomes ready" do
+      tenant = configured_tenant!()
+      version = Interview.Fixtures.version!(Interview.Fixtures.template!(tenant.id).id)
+      q = Interview.Fixtures.question!(version.id, 1, %{required: true})
+      session = Interview.Fixtures.session!(tenant.id, version.id, %{state: "in_progress"})
+
+      {:ok, response, _} = Capture.claim_instance(session, q, 1, "cap-A")
+      {:ok, _} = Capture.record_capture_complete(response.id, "cap-A", 100)
+      {:ok, %Session{state: "submitted"}} = Capture.submit_session(session)
+
+      {:ok, _} =
+        Capture.mark_ready(response.id, %{storage_key: "x", duration_ms: 1000, format: "mp4"})
+
+      assert_enqueued(worker: ScorePipeline, args: %{"session_id" => session.id})
     end
   end
 end

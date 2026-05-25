@@ -167,6 +167,22 @@ body > * { position: relative; z-index: 1; }
   border-radius: 1px;
 }
 
+/* Visually hidden but read by screen readers. The standard WCAG
+ * pattern: clip-path:inset(50%) is the canonical implementation; the
+ * older width:1px/height:1px/overflow:hidden recipe is also valid but
+ * has occasional layout side effects. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
    Editorial primitives.
    ────────────────────────────────────────────────────────────────────── */
@@ -400,5 +416,170 @@ body > * { position: relative; z-index: 1; }
 }
 
 .alert { box-shadow: none; border: 1px solid color-mix(in oklch, var(--color-base-content) 14%, transparent); }
+
+/* ─── Candidate UX countdowns ──────────────────────────────────────
+ *
+ * Think-time phrase + recording-time numeral. Two minimalist
+ * widgets that intentionally don't read as dashboard UI — see
+ * docs/candidate-ux-overhaul-plan.md. The shape of these classes
+ * is owned by JS hooks (think_time_countdown.js + recorder.js);
+ * CSS only handles visual treatment of states.
+ */
+
+.think-time-phrase {
+  /* Subtle slide-in so the phrase appears with the prompt rather
+   * than the recorder. Honors the candidate's reduced-motion pref. */
+  animation: think-time-rise 0.6s ease-out both;
+}
+@keyframes think-time-rise {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .think-time-phrase { animation: none; }
+}
+
+.think-time-done {
+  /* When the phrase has flipped to "Ready when you are." — slightly
+   * more present, gentle shift toward the body-text ink. */
+  color: color-mix(in oklch, var(--color-base-content) 92%, transparent);
+}
+
+.recording-countdown {
+  /* Anchored bottom-right inside the preview frame (positioned via
+   * the LV template). Hairline underline that recedes in the last
+   * 15s; amber numeral in the last 5s. */
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 1px;
+  transition: color 0.4s ease, border-bottom-color 0.4s ease;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0.02em;
+}
+.recording-countdown:empty {
+  /* Pre-recording / post-recording: don't draw the underline on an
+   * empty element — would render a stray hairline floating in the
+   * frame. */
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* Recorder button visibility on the CANDIDATE side. Scoped to the
+ * [data-camera-state] wrapper that only the candidate's CaptureLive
+ * renders — the recruiter prompt-recorder uses the same data-action
+ * attributes but no data-camera-state, so its Record/Stop buttons
+ * are not affected by these rules.
+ *
+ * Visibility matrix (candidate only):
+ *   data-action="request" (Open camera) → any phase, hidden once
+ *                                          data-camera-state="on"
+ *                                          (see rule further below)
+ *   data-action="start"   (Record)      → :prep only
+ *   data-action="stop"    (Stop)        → :recording only
+ *
+ * Default within the candidate wrapper: hide. Per-phase rules opt in.
+ */
+[data-camera-state] [data-action="start"],
+[data-camera-state] [data-action="stop"] {
+  display: none;
+}
+[data-camera-state][data-phase="prep"] [data-action="start"] {
+  display: inline-flex;
+}
+[data-camera-state][data-phase="recording"] [data-action="stop"] {
+  display: inline-flex;
+}
+
+/* Once the camera is open, hide the "Open camera" CTA — keeping it
+ * visible suggests the candidate might need to reopen it. */
+[data-camera-state="on"] [data-action="request"] {
+  display: none;
+}
+
+/* Mic-level indicator — small bar next to the recorder action links
+ * that fills based on a CSS custom property `--mic-level` (0..1)
+ * driven by the Recorder hook's requestAnimationFrame loop.
+ *
+ * Visible only when the candidate can do something with this info:
+ * permission granted AND phase is :intro or :prep. Once recording
+ * starts the recording-time countdown owns the bottom of the frame
+ * and the mic level is redundant noise. */
+.mic-level {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  --mic-level: 0;
+}
+[data-camera-state="on"][data-phase="intro"] .mic-level,
+[data-camera-state="on"][data-phase="prep"] .mic-level {
+  display: inline-flex;
+}
+.mic-level-bar {
+  position: relative;
+  display: inline-block;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in oklch, var(--color-base-content) 12%, transparent);
+  overflow: hidden;
+}
+.mic-level-bar::after {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: calc(var(--mic-level) * 100%);
+  background: color-mix(in oklch, var(--color-base-content) 70%, transparent);
+  transition: width 80ms ease-out, background-color 200ms ease;
+}
+.mic-level.mic-level-live .mic-level-bar::after {
+  background: var(--color-primary, #0aa3b3);
+}
+.mic-level-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+}
+
+/* Cinematic 3-2-1 overlay during the last few seconds of think-time
+ * (and the last few seconds of the post-thinktime idle window). Big
+ * semi-transparent numeral centered on the preview, like a movie
+ * countdown. Empty by default so it's invisible; the JS hook fills
+ * in the numeral when appropriate. */
+.cinematic-countdown {
+  font-size: clamp(5rem, 14vw, 9rem);
+  line-height: 1;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  letter-spacing: -0.03em;
+  font-feature-settings: "tnum" 1;
+  /* Soft scale-in on each numeral change. The JS toggles a class to
+   * retrigger the animation. */
+  transition: opacity 0.2s ease;
+}
+.cinematic-countdown:empty {
+  opacity: 0;
+}
+.cinematic-countdown.cinematic-countdown-tick {
+  animation: cinematic-tick 0.95s ease-out;
+}
+@keyframes cinematic-tick {
+  0%   { opacity: 0;    transform: scale(1.35); }
+  20%  { opacity: 0.65; transform: scale(1.0); }
+  80%  { opacity: 0.55; transform: scale(0.98); }
+  100% { opacity: 0;    transform: scale(0.95); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cinematic-countdown.cinematic-countdown-tick {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+.recording-countdown-receding {
+  border-bottom-color: color-mix(in oklch, currentColor 40%, transparent);
+}
+.recording-countdown-warning {
+  color: #d6924a; /* warm amber — see countdown UI spec */
+  border-bottom-color: #d6924a;
+}
 
 /* This file is for your main application CSS */

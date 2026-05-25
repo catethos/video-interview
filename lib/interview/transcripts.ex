@@ -32,12 +32,32 @@ defmodule Interview.Transcripts do
               | {:error, {:transport, term()}}
               | {:error, term()}
 
+  @callback transcribe_vtt(audio_path :: String.t()) ::
+              {:ok, %{vtt: String.t(), provider: String.t()}}
+              | {:error, :missing_api_key}
+              | {:error, :unauthorized}
+              | {:error, :rate_limited}
+              | {:error, {:server_error, integer()}}
+              | {:error, {:http_error, integer(), String.t()}}
+              | {:error, {:transport, term()}}
+              | {:error, term()}
+
   @doc """
   Run transcription via the configured adapter. Returns
   `{:ok, %{text:, provider:}}` or a structured error.
   """
   def transcribe(audio_path) when is_binary(audio_path) do
     impl().transcribe(audio_path)
+  end
+
+  @doc """
+  Same as `transcribe/1` but returns a WebVTT-formatted string with
+  timing cues — used for the auto-caption track on recruiter prompt
+  videos. The returned `:vtt` is ready to drop into a `<track src>`
+  element's body or write directly to a .vtt file.
+  """
+  def transcribe_vtt(audio_path) when is_binary(audio_path) do
+    impl().transcribe_vtt(audio_path)
   end
 
   @doc "Whether transcripts are turned on (config `enabled: true`)."

@@ -66,6 +66,12 @@ defmodule Interview.Templates.PromptAsset do
     field :finalized_at, :utc_datetime_usec
     field :last_error_code, :string
     field :last_error_message, :string
+    # Async caption pipeline: populated by Workers.PromptAssetCaption
+    # after Whisper returns a WebVTT file. Only video/audio assets
+    # ever populate these. See migration 20260521000002.
+    field :caption_storage_key, :string
+    field :caption_provider, :string
+    field :caption_ready_at, :utc_datetime_usec
 
     belongs_to :tenant, Interview.Tenants.Tenant
     belongs_to :created_by_user, Interview.Auth.Recruiters.User
@@ -98,7 +104,10 @@ defmodule Interview.Templates.PromptAsset do
       :finalized_at,
       :last_error_code,
       :last_error_message,
-      :created_by_user_id
+      :created_by_user_id,
+      :caption_storage_key,
+      :caption_provider,
+      :caption_ready_at
     ])
     |> validate_required([:tenant_id, :kind, :state])
     |> validate_inclusion(:kind, @kinds)

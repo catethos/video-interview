@@ -10,6 +10,14 @@ defmodule Interview.Templates.Version do
     field :retake_policy, :map, default: %{"max_attempts" => 1, "mode" => "first_only"}
     field :published_at, :utc_datetime_usec
     field :published_by, :string
+    # Deep-link handoff context: when this draft was created from an
+    # external system (e.g. Pulsifi), these hold the validated return_to
+    # URL and opaque state token so publish can still redirect even if
+    # the recruiter's URL query was stripped mid-edit by an in-LV
+    # push_navigate (e.g. the prompt recorder). Cleared naturally:
+    # publishing this draft creates a fresh empty next draft.
+    field :external_return_url, :string
+    field :external_return_state, :string
 
     belongs_to :template, Interview.Templates.Template
     has_many :questions, Interview.Templates.Question, foreign_key: :template_version_id
@@ -19,7 +27,15 @@ defmodule Interview.Templates.Version do
 
   def changeset(version, attrs) do
     version
-    |> cast(attrs, [:template_id, :version_number, :retake_policy, :published_at, :published_by])
+    |> cast(attrs, [
+      :template_id,
+      :version_number,
+      :retake_policy,
+      :published_at,
+      :published_by,
+      :external_return_url,
+      :external_return_state
+    ])
     |> validate_required([:template_id, :version_number])
     |> unique_constraint([:template_id, :version_number])
   end

@@ -17,12 +17,13 @@ defmodule InterviewWeb.RecruiterTemplateLive do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Interview.ExternalIntegration.ReturnTo
   alias Interview.Repo
   alias Interview.Templates
   alias Interview.Templates.{PromptAsset, Question, Version}
 
   @impl true
-  def mount(%{"id" => template_id}, _session, socket) do
+  def mount(%{"id" => template_id} = params, _session, socket) do
     tenant_id = socket.assigns.tenant.id
 
     case Templates.get_template_with_current_version(template_id) do
@@ -42,6 +43,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
         {:ok, draft} = ensure_draft(template, draft)
         questions = Templates.list_questions(draft)
         assets = load_assets_for(questions)
+        external_integration = build_external_integration(params, socket.assigns.tenant, draft)
 
         {:ok,
          socket
@@ -54,7 +56,28 @@ defmodule InterviewWeb.RecruiterTemplateLive do
          |> assign(:versions, Templates.list_versions(template.id))
          |> assign(:saved_at, nil)
          |> assign(:collapsed_sections, MapSet.new([:versions, :retake_policy]))
-         |> assign(:collapsed_questions, MapSet.new())}
+         |> assign(:collapsed_questions, MapSet.new())
+         |> assign(:external_integration, external_integration)}
+    end
+  end
+
+  # `return_to`/`state` are forwarded by external systems (e.g. Pulsifi) to
+  # complete a deep-link template-creation handoff. When present and the
+  # origin is whitelisted, publishing the template redirects the browser
+  # back to the caller with the new template UUID. Invalid `return_to`s are
+  # silently dropped (the LiveView still works for the recruiter — they just
+  # land on the normal post-publish detail page).
+  #
+  # Falls back to fields stored on the draft when the URL doesn't carry
+  # the params — this covers the case where an in-LV navigation (e.g. the
+  # prompt recorder's post-attach push_navigate) strips the query mid-edit.
+  defp build_external_integration(params, tenant, draft) do
+    return_to = params["return_to"] || draft.external_return_url
+    state = params["state"] || draft.external_return_state
+
+    case ReturnTo.validate(return_to, tenant.allowed_return_origins) do
+      {:ok, uri} -> %{return_to_uri: uri, state: state}
+      {:error, _} -> nil
     end
   end
 
@@ -100,15 +123,21 @@ defmodule InterviewWeb.RecruiterTemplateLive do
     end
   end
 
-  def handle_event("update_retake", %{"field" => field, "value" => value}, socket) do
+  # The select fires `phx-change` (a FORM event), which silently
+  # ignores `phx-value-*` attributes — only the named form fields
+  # reach this handler. The number input fires `phx-blur` (NOT a
+  # form event), so its `phx-value-field` did get through. Rather
+  # than maintain two param shapes, accept whatever named keys arrive
+  # and merge them into retake_policy a piece at a time. Each field
+  # write is independent — partial params won't clobber the other.
+  def handle_event("update_retake", params, socket) do
     draft = socket.assigns.draft
     rp = draft.retake_policy || %{}
 
     new_rp =
-      case field do
-        "max_attempts" -> Map.put(rp, "max_attempts", parse_int(value))
-        "mode" -> Map.put(rp, "mode", value)
-      end
+      rp
+      |> maybe_set_retake("max_attempts", parse_int_or_nil(params["max_attempts"]))
+      |> maybe_set_retake("mode", params["mode"])
 
     case Templates.update_draft_version(draft, %{retake_policy: new_rp}) do
       {:ok, updated} ->
@@ -121,6 +150,22 @@ defmodule InterviewWeb.RecruiterTemplateLive do
         {:noreply, put_flash(socket, :error, "Failed to update retake policy")}
     end
   end
+
+  defp maybe_set_retake(map, _key, nil), do: map
+  defp maybe_set_retake(map, key, value), do: Map.put(map, key, value)
+
+  defp parse_int_or_nil(nil), do: nil
+  defp parse_int_or_nil(""), do: nil
+
+  defp parse_int_or_nil(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_int_or_nil(n) when is_integer(n), do: n
+  defp parse_int_or_nil(_), do: nil
 
   def handle_event("add_question", _params, socket) do
     questions = socket.assigns.questions
@@ -211,13 +256,28 @@ defmodule InterviewWeb.RecruiterTemplateLive do
 
   def handle_event("publish", _params, socket) do
     case Templates.publish_draft(socket.assigns.draft) do
-      {:ok, _published} ->
-        # Re-fetch: the published version is now `current_version`, and
-        # the draft is gone (or freshly created if a clean slate is
-        # desired — leave that to a subsequent click on "New draft").
-        {:noreply,
-         socket
-         |> push_navigate(to: ~p"/recruiter/templates/#{socket.assigns.template.id}")}
+      {:ok, published} ->
+        case socket.assigns.external_integration do
+          nil ->
+            # Normal flow: re-fetch the template detail page so the just-
+            # published version is visible as `current_version`.
+            {:noreply,
+             push_navigate(socket, to: ~p"/recruiter/templates/#{socket.assigns.template.id}")}
+
+          %{return_to_uri: uri, state: state} ->
+            # Deep-link handoff: send the recruiter's browser back to the
+            # external caller (e.g. Pulsifi) with the new template UUIDs
+            # appended. The `state` token is echoed unchanged so the
+            # caller can verify the callback's origin.
+            redirect_url =
+              ReturnTo.build_redirect(uri, %{
+                "template_id" => socket.assigns.template.id,
+                "template_version_id" => published.id,
+                "state" => state
+              })
+
+            {:noreply, redirect(socket, external: redirect_url)}
+        end
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Publish failed: #{inspect(reason)}")}
@@ -291,8 +351,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
              )}
 
           {:error, reason} ->
-            {:noreply,
-             put_flash(socket, :error, "Could not delete version: #{inspect(reason)}")}
+            {:noreply, put_flash(socket, :error, "Could not delete version: #{inspect(reason)}")}
         end
 
       nil ->
@@ -315,8 +374,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
              |> stamp_saved()}
 
           {:error, reason} ->
-            {:noreply,
-             put_flash(socket, :error, "Could not switch version: #{inspect(reason)}")}
+            {:noreply, put_flash(socket, :error, "Could not switch version: #{inspect(reason)}")}
         end
 
       nil ->
@@ -443,9 +501,7 @@ defmodule InterviewWeb.RecruiterTemplateLive do
           </p>
         </header>
 
-        <section
-          data-section-state={section_state(@collapsed_sections, :versions)}
-        >
+        <section data-section-state={section_state(@collapsed_sections, :versions)}>
           <button
             type="button"
             phx-click="toggle_section"
@@ -465,65 +521,61 @@ defmodule InterviewWeb.RecruiterTemplateLive do
           </button>
           <div class="section-shutter">
             <div class="pt-5">
-          <ul class="space-y-2.5 text-[13.5px] font-mono" id="versions-list">
-            <li
-              :for={v <- @versions}
-              class={[
-                "flex flex-wrap items-baseline gap-x-5 gap-y-1",
-                v.id == @draft.id && "text-base-content",
-                v.id != @draft.id && "text-base-content/65"
-              ]}
-            >
-              <span class={["w-8 tabular-nums", v.id == @draft.id && "font-medium"]}>
-                v{v.version_number}
-              </span>
-              <span :if={v.published_at} class="text-base-content/55">
-                published {format_time(v.published_at)}
-              </span>
-              <span
-                :if={is_nil(v.published_at)}
-                class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] opacity-75"
-              >
-                draft
-              </span>
-              <span
-                :if={@current_version && @current_version.id == v.id}
-                class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] text-primary/85"
-              >
-                current
-              </span>
-              <button
-                :if={
-                  v.published_at && (!@current_version || @current_version.id != v.id)
-                }
-                type="button"
-                phx-click="set_current_version"
-                phx-value-id={v.id}
-                data-confirm={"Make v#{v.version_number} the current version? Only new sessions are affected."}
-                class="zen-link text-base-content/55 hover:text-base-content text-[12.5px]"
-              >
-                <span class="zen-arrow" aria-hidden="true">↺</span>
-                <span>Use this version</span>
-              </button>
-              <button
-                :if={!@current_version || @current_version.id != v.id}
-                type="button"
-                phx-click="delete_version"
-                phx-value-id={v.id}
-                data-confirm={"Delete v#{v.version_number}? Refuses if any sessions reference it."}
-                class="zen-link text-error/55 hover:text-error text-[12.5px]"
-              >
-                <span>Delete</span>
-              </button>
-            </li>
-          </ul>
+              <ul class="space-y-2.5 text-[13.5px] font-mono" id="versions-list">
+                <li
+                  :for={v <- @versions}
+                  class={[
+                    "flex flex-wrap items-baseline gap-x-5 gap-y-1",
+                    v.id == @draft.id && "text-base-content",
+                    v.id != @draft.id && "text-base-content/65"
+                  ]}
+                >
+                  <span class={["w-8 tabular-nums", v.id == @draft.id && "font-medium"]}>
+                    v{v.version_number}
+                  </span>
+                  <span :if={v.published_at} class="text-base-content/55">
+                    published {format_time(v.published_at)}
+                  </span>
+                  <span
+                    :if={is_nil(v.published_at)}
+                    class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] opacity-75"
+                  >
+                    draft
+                  </span>
+                  <span
+                    :if={@current_version && @current_version.id == v.id}
+                    class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] text-primary/85"
+                  >
+                    current
+                  </span>
+                  <button
+                    :if={v.published_at && (!@current_version || @current_version.id != v.id)}
+                    type="button"
+                    phx-click="set_current_version"
+                    phx-value-id={v.id}
+                    data-confirm={"Make v#{v.version_number} the current version? Only new sessions are affected."}
+                    class="zen-link text-base-content/55 hover:text-base-content text-[12.5px]"
+                  >
+                    <span class="zen-arrow" aria-hidden="true">↺</span>
+                    <span>Use this version</span>
+                  </button>
+                  <button
+                    :if={!@current_version || @current_version.id != v.id}
+                    type="button"
+                    phx-click="delete_version"
+                    phx-value-id={v.id}
+                    data-confirm={"Delete v#{v.version_number}? Refuses if any sessions reference it."}
+                    class="zen-link text-error/55 hover:text-error text-[12.5px]"
+                  >
+                    <span>Delete</span>
+                  </button>
+                </li>
+              </ul>
             </div>
           </div>
         </section>
 
-        <section
-          data-section-state={section_state(@collapsed_sections, :retake_policy)}
-        >
+        <section data-section-state={section_state(@collapsed_sections, :retake_policy)}>
           <button
             type="button"
             phx-click="toggle_section"
@@ -543,41 +595,49 @@ defmodule InterviewWeb.RecruiterTemplateLive do
           </button>
           <div class="section-shutter">
             <div class="pt-5">
-          <div class="grid grid-cols-2 gap-x-10 gap-y-5 max-w-md">
-            <label class="block space-y-2">
-              <span class="zen-eyebrow opacity-65">Max attempts</span>
-              <input
-                type="number"
-                min="1"
-                value={@draft.retake_policy["max_attempts"]}
-                phx-blur="update_retake"
-                phx-value-field="max_attempts"
-                name="value"
-                class="input input-sm w-full"
-              />
-            </label>
-            <label class="block space-y-2">
-              <span class="zen-eyebrow opacity-65">Mode</span>
-              <select
+              <%!--
+                Wrap both inputs in a single <form phx-change>. Any change
+                event then carries the CURRENT DOM value of EVERY named
+                field — fixes the prior bug where typing '2' in max_attempts
+                then clicking the mode select made the server overwrite
+                max_attempts back to 1 (because the select fired phx-change
+                before the input fired phx-blur, and the re-render used
+                stale server state).
+                phx-debounce keeps per-keystroke max_attempts changes from
+                spamming the websocket.
+              --%>
+              <form
                 phx-change="update_retake"
-                phx-value-field="mode"
-                name="value"
-                class="select select-sm w-full"
+                phx-debounce="400"
+                class="grid grid-cols-2 gap-x-10 gap-y-5 max-w-md"
               >
-                <option value="first_only" selected={@draft.retake_policy["mode"] == "first_only"}>
-                  first only
-                </option>
-                <option value="last" selected={@draft.retake_policy["mode"] == "last"}>last</option>
-              </select>
-            </label>
-          </div>
+                <label class="block space-y-2">
+                  <span class="zen-eyebrow opacity-65">Max attempts</span>
+                  <input
+                    type="number"
+                    min="1"
+                    value={@draft.retake_policy["max_attempts"]}
+                    name="max_attempts"
+                    class="input input-sm w-full"
+                  />
+                </label>
+                <label class="block space-y-2">
+                  <span class="zen-eyebrow opacity-65">Mode</span>
+                  <select name="mode" class="select select-sm w-full">
+                    <option value="first_only" selected={@draft.retake_policy["mode"] == "first_only"}>
+                      first only
+                    </option>
+                    <option value="last" selected={@draft.retake_policy["mode"] == "last"}>
+                      last
+                    </option>
+                  </select>
+                </label>
+              </form>
             </div>
           </div>
         </section>
 
-        <section
-          data-section-state={section_state(@collapsed_sections, :questions)}
-        >
+        <section data-section-state={section_state(@collapsed_sections, :questions)}>
           <div class="flex items-baseline justify-between gap-4">
             <button
               type="button"
@@ -608,258 +668,266 @@ defmodule InterviewWeb.RecruiterTemplateLive do
 
           <div class="section-shutter">
             <div class="pt-7">
-          <ol class="space-y-12" id="questions-list">
-            <li
-              :for={{q, idx} <- Enum.with_index(@questions)}
-              id={"question-#{q.id}"}
-              data-question-id={q.id}
-              data-section-state={section_state(@collapsed_questions, q.id)}
-              class="pt-7 border-t border-base-content/10 first:border-t-0 first:pt-0"
-            >
-              <div class="flex items-baseline justify-between gap-4">
-                <button
-                  type="button"
-                  phx-click="toggle_question"
-                  phx-value-id={q.id}
-                  class="group flex items-baseline gap-4 min-w-0 flex-1 text-left cursor-pointer hover:text-base-content transition-colors"
+              <ol class="space-y-12" id="questions-list">
+                <li
+                  :for={{q, idx} <- Enum.with_index(@questions)}
+                  id={"question-#{q.id}"}
+                  data-question-id={q.id}
+                  data-section-state={section_state(@collapsed_questions, q.id)}
+                  class="pt-7 border-t border-base-content/10 first:border-t-0 first:pt-0"
                 >
-                  <span
-                    class={[
-                      "transition-transform duration-300 inline-block text-[12px] text-base-content/55",
-                      if(MapSet.member?(@collapsed_questions, q.id), do: "", else: "rotate-90")
-                    ]}
-                    aria-hidden="true"
-                  >
-                    ▸
-                  </span>
-                  <span class="font-display italic text-[1.3rem] text-base-content/45 tabular-nums leading-none shrink-0">
-                    {String.pad_leading(to_string(q.position), 2, "0")}
-                  </span>
-                  <span class="text-[13.5px] text-base-content/65 truncate italic font-display">
-                    {question_summary(q.prompt_text)}
-                  </span>
-                </button>
-                <div class="flex items-baseline gap-6 text-[14px] shrink-0">
-                  <button
-                    phx-click="move"
-                    phx-value-id={q.id}
-                    phx-value-dir="up"
-                    disabled={idx == 0}
-                    class="zen-link text-base-content/55 hover:text-base-content disabled:opacity-25 disabled:cursor-not-allowed"
-                    aria-label="Move up"
-                  >
-                    <span aria-hidden="true">↑</span>
-                  </button>
-                  <button
-                    phx-click="move"
-                    phx-value-id={q.id}
-                    phx-value-dir="down"
-                    disabled={idx == length(@questions) - 1}
-                    class="zen-link text-base-content/55 hover:text-base-content disabled:opacity-25 disabled:cursor-not-allowed"
-                    aria-label="Move down"
-                  >
-                    <span aria-hidden="true">↓</span>
-                  </button>
-                  <button
-                    phx-click="delete_question"
-                    phx-value-id={q.id}
-                    data-confirm="Delete this question?"
-                    class="zen-link text-error/65 hover:text-error"
-                    aria-label="Delete"
-                  >
-                    <span aria-hidden="true">×</span>
-                  </button>
-                </div>
-              </div>
+                  <div class="flex items-baseline justify-between gap-4">
+                    <button
+                      type="button"
+                      phx-click="toggle_question"
+                      phx-value-id={q.id}
+                      class="group flex items-baseline gap-4 min-w-0 flex-1 text-left cursor-pointer hover:text-base-content transition-colors"
+                    >
+                      <span
+                        class={[
+                          "transition-transform duration-300 inline-block text-[12px] text-base-content/55",
+                          if(MapSet.member?(@collapsed_questions, q.id), do: "", else: "rotate-90")
+                        ]}
+                        aria-hidden="true"
+                      >
+                        ▸
+                      </span>
+                      <span class="font-display italic text-[1.3rem] text-base-content/45 tabular-nums leading-none shrink-0">
+                        {String.pad_leading(to_string(q.position), 2, "0")}
+                      </span>
+                      <span class="text-[13.5px] text-base-content/65 truncate italic font-display">
+                        {question_summary(q.prompt_text)}
+                      </span>
+                    </button>
+                    <div class="flex items-baseline gap-6 text-[14px] shrink-0">
+                      <button
+                        phx-click="move"
+                        phx-value-id={q.id}
+                        phx-value-dir="up"
+                        disabled={idx == 0}
+                        class="zen-link text-base-content/55 hover:text-base-content disabled:opacity-25 disabled:cursor-not-allowed"
+                        aria-label="Move up"
+                      >
+                        <span aria-hidden="true">↑</span>
+                      </button>
+                      <button
+                        phx-click="move"
+                        phx-value-id={q.id}
+                        phx-value-dir="down"
+                        disabled={idx == length(@questions) - 1}
+                        class="zen-link text-base-content/55 hover:text-base-content disabled:opacity-25 disabled:cursor-not-allowed"
+                        aria-label="Move down"
+                      >
+                        <span aria-hidden="true">↓</span>
+                      </button>
+                      <button
+                        phx-click="delete_question"
+                        phx-value-id={q.id}
+                        data-confirm="Delete this question?"
+                        class="zen-link text-error/65 hover:text-error"
+                        aria-label="Delete"
+                      >
+                        <span aria-hidden="true">×</span>
+                      </button>
+                    </div>
+                  </div>
 
-              <div class="section-shutter">
-                <div class="space-y-6 pt-6">
-                  <label class="block space-y-2">
-                <span class="zen-eyebrow opacity-65">Prompt · markdown</span>
-                <textarea
-                  rows="3"
-                  phx-blur="update_field"
-                  phx-value-id={q.id}
-                  phx-value-field="prompt_text"
-                  name="value"
-                  class="textarea w-full leading-relaxed"
-                >{q.prompt_text}</textarea>
-              </label>
+                  <div class="section-shutter">
+                    <div class="space-y-6 pt-6">
+                      <label class="block space-y-2">
+                        <span class="zen-eyebrow opacity-65">Prompt · markdown</span>
+                        <textarea
+                          rows="3"
+                          phx-blur="update_field"
+                          phx-value-id={q.id}
+                          phx-value-field="prompt_text"
+                          name="value"
+                          class="textarea w-full leading-relaxed"
+                        >{q.prompt_text}</textarea>
+                      </label>
 
-              <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-4 items-stretch">
-                <label class="flex flex-col gap-2">
-                  <span class="zen-eyebrow opacity-65 leading-tight">Think time · s</span>
-                  <input
-                    type="number"
-                    min="1"
-                    value={q.think_time_seconds}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="think_time_seconds"
-                    name="value"
-                    class="input input-sm w-full mt-auto"
-                  />
-                </label>
-                <label class="flex flex-col gap-2">
-                  <span class="zen-eyebrow opacity-65 leading-tight">Min answer · s</span>
-                  <input
-                    type="number"
-                    min="1"
-                    value={q.min_answer_seconds}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="min_answer_seconds"
-                    name="value"
-                    class="input input-sm w-full mt-auto"
-                  />
-                </label>
-                <label class="flex flex-col gap-2">
-                  <span class="zen-eyebrow opacity-65 leading-tight">Max answer · s</span>
-                  <input
-                    type="number"
-                    min="1"
-                    value={q.max_answer_seconds}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="max_answer_seconds"
-                    name="value"
-                    class="input input-sm w-full mt-auto"
-                  />
-                </label>
-                <label class="flex flex-col gap-2">
-                  <span class="zen-eyebrow opacity-65 leading-tight">Max attempts override</span>
-                  <input
-                    type="number"
-                    min="1"
-                    value={q.max_attempts_override}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="max_attempts_override"
-                    name="value"
-                    class="input input-sm w-full mt-auto"
-                  />
-                </label>
-              </div>
+                      <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-4 items-stretch">
+                        <label class="flex flex-col gap-2">
+                          <span class="zen-eyebrow opacity-65 leading-tight">Think time · s</span>
+                          <input
+                            type="number"
+                            min="1"
+                            value={q.think_time_seconds}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="think_time_seconds"
+                            name="value"
+                            class="input input-sm w-full mt-auto"
+                          />
+                        </label>
+                        <label class="flex flex-col gap-2">
+                          <span class="zen-eyebrow opacity-65 leading-tight">Min answer · s</span>
+                          <input
+                            type="number"
+                            min="1"
+                            value={q.min_answer_seconds}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="min_answer_seconds"
+                            name="value"
+                            class="input input-sm w-full mt-auto"
+                          />
+                        </label>
+                        <label class="flex flex-col gap-2">
+                          <span class="zen-eyebrow opacity-65 leading-tight">Max answer · s</span>
+                          <input
+                            type="number"
+                            min="1"
+                            value={q.max_answer_seconds}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="max_answer_seconds"
+                            name="value"
+                            class="input input-sm w-full mt-auto"
+                          />
+                        </label>
+                        <label class="flex flex-col gap-2">
+                          <span class="zen-eyebrow opacity-65 leading-tight">
+                            Max attempts override
+                          </span>
+                          <input
+                            type="number"
+                            min="1"
+                            value={q.max_attempts_override}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="max_attempts_override"
+                            name="value"
+                            class="input input-sm w-full mt-auto"
+                          />
+                        </label>
+                      </div>
 
-              <div
-                class="flex flex-wrap items-baseline gap-x-7 gap-y-3 text-[13.5px]"
-                id={"prompt-#{q.id}"}
-              >
-                <%= if q.prompt_asset_id do %>
-                  <span class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] text-success/80">
-                    prompt · {asset_label(@assets, q.prompt_asset_id)}
-                  </span>
-                  <.link
-                    navigate={~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/prompt"}
-                    class="zen-link text-base-content/65 hover:text-base-content"
-                  >
-                    <span class="zen-arrow" aria-hidden="true">↺</span>
-                    <span>Replace</span>
-                  </.link>
-                  <button
-                    phx-click="remove_prompt_asset"
-                    phx-value-id={q.id}
-                    data-confirm="Remove prompt video?"
-                    class="zen-link text-base-content/50 hover:text-base-content"
-                  >
-                    <span>Remove</span>
-                  </button>
-                <% else %>
-                  <.link
-                    navigate={~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/prompt"}
-                    class="zen-link text-base-content/70 hover:text-base-content"
-                  >
-                    <span class="zen-arrow" aria-hidden="true">●</span>
-                    <span>Record prompt</span>
-                  </.link>
-                <% end %>
+                      <div
+                        class="flex flex-wrap items-baseline gap-x-7 gap-y-3 text-[13.5px]"
+                        id={"prompt-#{q.id}"}
+                      >
+                        <%= if q.prompt_asset_id do %>
+                          <span class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] text-success/80">
+                            prompt · {asset_label(@assets, q.prompt_asset_id)}
+                          </span>
+                          <.link
+                            navigate={
+                              ~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/prompt"
+                            }
+                            class="zen-link text-base-content/65 hover:text-base-content"
+                          >
+                            <span class="zen-arrow" aria-hidden="true">↺</span>
+                            <span>Replace</span>
+                          </.link>
+                          <button
+                            phx-click="remove_prompt_asset"
+                            phx-value-id={q.id}
+                            data-confirm="Remove prompt video?"
+                            class="zen-link text-base-content/50 hover:text-base-content"
+                          >
+                            <span>Remove</span>
+                          </button>
+                        <% else %>
+                          <.link
+                            navigate={
+                              ~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/prompt"
+                            }
+                            class="zen-link text-base-content/70 hover:text-base-content"
+                          >
+                            <span class="zen-arrow" aria-hidden="true">●</span>
+                            <span>Record prompt</span>
+                          </.link>
+                        <% end %>
 
-                <span class="opacity-25" aria-hidden="true">·</span>
+                        <span class="opacity-25" aria-hidden="true">·</span>
 
-                <%= if q.attachment_asset_id do %>
-                  <span class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] opacity-70">
-                    attachment · {asset_label(@assets, q.attachment_asset_id)}
-                  </span>
-                  <button
-                    phx-click="remove_attachment"
-                    phx-value-id={q.id}
-                    data-confirm="Remove attachment?"
-                    class="zen-link text-base-content/50 hover:text-base-content"
-                  >
-                    <span>Remove</span>
-                  </button>
-                <% else %>
-                  <form
-                    id={"attach-form-#{q.id}"}
-                    phx-hook="AttachmentForm"
-                    action={~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/attachment"}
-                    method="post"
-                    enctype="multipart/form-data"
-                    class="inline-flex items-baseline"
-                  >
-                    <input
-                      type="hidden"
-                      name="_csrf_token"
-                      value={Phoenix.Controller.get_csrf_token()}
-                    />
-                    <label class="zen-link text-base-content/70 hover:text-base-content cursor-pointer">
-                      <span class="zen-arrow" aria-hidden="true">↑</span>
-                      <span>Attach image or PDF</span>
-                      <input
-                        type="file"
-                        name="attachment"
-                        accept="image/*,application/pdf"
-                        class="sr-only"
-                      />
-                    </label>
-                  </form>
-                <% end %>
-              </div>
+                        <%= if q.attachment_asset_id do %>
+                          <span class="zen-eyebrow normal-case tracking-[0.06em] text-[10.5px] opacity-70">
+                            attachment · {asset_label(@assets, q.attachment_asset_id)}
+                          </span>
+                          <button
+                            phx-click="remove_attachment"
+                            phx-value-id={q.id}
+                            data-confirm="Remove attachment?"
+                            class="zen-link text-base-content/50 hover:text-base-content"
+                          >
+                            <span>Remove</span>
+                          </button>
+                        <% else %>
+                          <form
+                            id={"attach-form-#{q.id}"}
+                            phx-hook="AttachmentForm"
+                            action={
+                              ~p"/recruiter/templates/#{@template.id}/questions/#{q.id}/attachment"
+                            }
+                            method="post"
+                            enctype="multipart/form-data"
+                            class="inline-flex items-baseline"
+                          >
+                            <input
+                              type="hidden"
+                              name="_csrf_token"
+                              value={Phoenix.Controller.get_csrf_token()}
+                            />
+                            <label class="zen-link text-base-content/70 hover:text-base-content cursor-pointer">
+                              <span class="zen-arrow" aria-hidden="true">↑</span>
+                              <span>Attach image or PDF</span>
+                              <input
+                                type="file"
+                                name="attachment"
+                                accept="image/*,application/pdf"
+                                class="sr-only"
+                              />
+                            </label>
+                          </form>
+                        <% end %>
+                      </div>
 
-              <div class="grid grid-cols-1 sm:grid-cols-[max-content_1fr_1fr] gap-x-8 gap-y-4 items-baseline">
-                <label class="inline-flex items-center gap-2.5 text-[13.5px] cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={q.required}
-                    phx-click="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="required"
-                    phx-value-value={!q.required && "true"}
-                    class="checkbox checkbox-sm"
-                  />
-                  <span class="zen-eyebrow normal-case tracking-[0.06em] text-[11px] opacity-80">
-                    Required
-                  </span>
-                </label>
-                <label class="block space-y-2">
-                  <span class="zen-eyebrow opacity-65">Tags · comma-separated</span>
-                  <input
-                    type="text"
-                    value={Enum.join(q.tags || [], ", ")}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="tags"
-                    name="value"
-                    class="input input-sm w-full"
-                  />
-                </label>
-                <label class="block space-y-2">
-                  <span class="zen-eyebrow opacity-65">External id</span>
-                  <input
-                    type="text"
-                    value={q.external_id}
-                    phx-blur="update_field"
-                    phx-value-id={q.id}
-                    phx-value-field="external_id"
-                    name="value"
-                    class="input input-sm w-full"
-                  />
-                </label>
-              </div>
-                </div>
-              </div>
-            </li>
-          </ol>
+                      <div class="grid grid-cols-1 sm:grid-cols-[max-content_1fr_1fr] gap-x-8 gap-y-4 items-baseline">
+                        <label class="inline-flex items-center gap-2.5 text-[13.5px] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={q.required}
+                            phx-click="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="required"
+                            phx-value-value={!q.required && "true"}
+                            class="checkbox checkbox-sm"
+                          />
+                          <span class="zen-eyebrow normal-case tracking-[0.06em] text-[11px] opacity-80">
+                            Required
+                          </span>
+                        </label>
+                        <label class="block space-y-2">
+                          <span class="zen-eyebrow opacity-65">Tags · comma-separated</span>
+                          <input
+                            type="text"
+                            value={Enum.join(q.tags || [], ", ")}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="tags"
+                            name="value"
+                            class="input input-sm w-full"
+                          />
+                        </label>
+                        <label class="block space-y-2">
+                          <span class="zen-eyebrow opacity-65">External id</span>
+                          <input
+                            type="text"
+                            value={q.external_id}
+                            phx-blur="update_field"
+                            phx-value-id={q.id}
+                            phx-value-field="external_id"
+                            name="value"
+                            class="input input-sm w-full"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              </ol>
             </div>
           </div>
         </section>

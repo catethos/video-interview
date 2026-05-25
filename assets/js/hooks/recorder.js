@@ -27,6 +27,10 @@ const Recorder = {
     };
 
     this.preview = this.el.querySelector('video[data-role="preview"]');
+    this.countdownEl = this.el.querySelector('[data-role="recording-countdown"]');
+    this.micLevelEl = this.el.querySelector('[data-role="mic-level"]');
+    this.countdownTimer = null;
+    this.micLevelFrame = null;
     this.bind("request", () => {
       // Optimistic LV ping so the UI can react the instant the candidate
       // commits — getUserMedia + the browser permission dialog can take
@@ -38,7 +42,9 @@ const Recorder = {
     });
     this.bind("start", () => this.startRecording());
     this.bind("stop", () => this.stopRecording());
-    this.bind("release", () => this.releaseCamera());
+    // Note: no `release` binding — candidates can't choose to drop the
+    // camera mid-interview. The hook still owns `releaseCamera()` for
+    // unmount cleanup (see destroyed() → core.destroy()).
 
     this.handleEvent("set_question", (payload) => this.applyQuestion(payload));
     this.handleEvent("auth_acked", (payload) => {
@@ -47,6 +53,31 @@ const Recorder = {
       }
     });
     this.handleEvent("post_to_parent", (payload) => this.postToParent(payload));
+
+    // Cross-hook handoff from ThinkTimeCountdown: when the post-
+    // thinktime idle window expires, recording must start whether
+    // the candidate clicked Record or not (cheating-window mitigation).
+    // Listening at document level because the dispatcher (an external
+    // hook) can't reach into this section's DOM directly.
+    this.onAutoStart = () => this.startRecording();
+    document.addEventListener("candidate:auto-start-recording", this.onAutoStart);
+
+    // Focus telemetry: tab/window blur or visibilitychange are recorded
+    // server-side so the recruiter dashboard can surface "candidate left
+    // the tab 2× during this answer". The LV only persists when phase
+    // is :recording (see capture_live.ex handle_event); we fire from JS
+    // unconditionally and let the server filter. Coalescing window
+    // collapses blur+visibilitychange pairs that some browsers fire
+    // together (~250ms).
+    this.onVisibility = () => {
+      if (document.visibilityState === "hidden") this.fireFocusEvent("focus_lost");
+      else this.fireFocusEvent("focus_regained");
+    };
+    this.onBlur = () => this.fireFocusEvent("focus_lost");
+    this.onFocus = () => this.fireFocusEvent("focus_regained");
+    document.addEventListener("visibilitychange", this.onVisibility);
+    window.addEventListener("blur", this.onBlur);
+    window.addEventListener("focus", this.onFocus);
 
     if (window.parent && window.parent !== window) {
       this.bindPostMessage();
@@ -78,7 +109,17 @@ const Recorder = {
 
   destroyed() {
     if (this.onMessage) window.removeEventListener("message", this.onMessage);
+    if (this.onAutoStart) {
+      document.removeEventListener("candidate:auto-start-recording", this.onAutoStart);
+    }
+    if (this.onVisibility) {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+    }
+    if (this.onBlur) window.removeEventListener("blur", this.onBlur);
+    if (this.onFocus) window.removeEventListener("focus", this.onFocus);
     if (this.core) this.core.destroy();
+    this.stopRecordingCountdown();
+    this.stopMicLevelLoop();
   },
 
   // --- Core event bridge ----------------------------------------------
@@ -91,19 +132,32 @@ const Recorder = {
 
       case "permission": {
         this.pushEvent("permission", payload);
-        if (payload.state === "granted") this.postToParent({ type: "permissions_granted" });
+        if (payload.state === "granted") {
+          this.postToParent({ type: "permissions_granted" });
+          this.startMicLevelLoop();
+        }
         if (payload.state === "denied") this.postToParent({ type: "permissions_denied" });
+        if (payload.state === "released") this.stopMicLevelLoop();
         break;
       }
 
       case "recorder_started":
+        this.state.startInFlight = false;
+        this.startRecordingCountdown();
         this.pushEvent("recorder_started", payload);
+        // Notify other hooks (e.g. ThinkTimeCountdown's idle timer)
+        // so they can cancel any pending auto-start logic.
+        document.dispatchEvent(new CustomEvent("candidate:recorder-started"));
+        this._announce("Recording started.");
         this.postToParent({ type: "recording_started", position: this.state.questionIndex });
         break;
 
       case "recorder_stopped":
+        this.state.startInFlight = false;
+        this.stopRecordingCountdown();
         this.setActionDisabled("start", false);
         this.pushEvent("recorder_stopped", payload);
+        this._announce("Recording stopped.");
         this.postToParent({
           type: "recording_stopped",
           position: this.state.questionIndex,
@@ -132,6 +186,7 @@ const Recorder = {
         break;
 
       case "recorder_error":
+        this.state.startInFlight = false;
         this.pushEvent("recorder_error", payload);
         break;
 
@@ -256,6 +311,16 @@ const Recorder = {
 
   startRecording() {
     if (!this.core) return;
+    // Single-flight guard. The auto-start handoff from ThinkTimeCountdown
+    // can race the candidate's manual Record click within the same
+    // 200ms window, producing TWO claim_instance pushes with different
+    // captureInstanceIds for the same attempt. The server treats that
+    // as a takeover and fences the first claim — recording never
+    // actually starts. Guard at the top so the second caller is a no-op.
+    if (this.state.startInFlight) return;
+    if (this.core.recorder && this.core.recorder.state !== "inactive") return;
+    this.state.startInFlight = true;
+
     this.state.captureInstanceId = uuid();
     this.state.responseId = null;
     this.state.tusUrl = null;
@@ -273,6 +338,7 @@ const Recorder = {
       },
       (reply) => {
         if (!reply || !reply.ok) {
+          this.state.startInFlight = false;
           this.setActionDisabled("start", false);
           this.pushEvent("recorder_error", {
             code: "claim_failed",
@@ -303,6 +369,141 @@ const Recorder = {
         }
       });
     });
+  },
+
+  // --- Recording-time countdown overlay -------------------------------
+  //
+  // Lives inside this hook (rather than a sibling hook) because the
+  // surrounding section uses phx-update="ignore" — a separate hook on
+  // a sibling can't track data-phase reliably across diffs. The
+  // authoritative auto-stop is in core.js's _armAutoStop; this widget
+  // is just the visible mirror, updating once per second.
+
+  startRecordingCountdown() {
+    if (!this.countdownEl) return;
+    const max = this.state.maxAnswerSeconds;
+    if (!Number.isInteger(max) || max <= 0) return;
+
+    this.countdownElapsed = 0;
+    this.renderRecordingCountdown();
+    this.countdownTimer = setInterval(() => this.tickRecordingCountdown(), 1000);
+  },
+
+  stopRecordingCountdown() {
+    if (this.countdownTimer) {
+      clearInterval(this.countdownTimer);
+      this.countdownTimer = null;
+    }
+    if (this.countdownEl) {
+      this.countdownEl.textContent = "";
+      this.countdownEl.classList.remove(
+        "recording-countdown-receding",
+        "recording-countdown-warning",
+      );
+    }
+  },
+
+  tickRecordingCountdown() {
+    const max = this.state.maxAnswerSeconds;
+    if (!Number.isInteger(max) || max <= 0) return;
+    this.countdownElapsed += 1;
+    if (this.countdownElapsed >= max) {
+      // Authoritative stop fires in core.js; clamp the visible value.
+      this.countdownElapsed = max;
+      this.renderRecordingCountdown();
+      return;
+    }
+    this.renderRecordingCountdown();
+  },
+
+  renderRecordingCountdown() {
+    if (!this.countdownEl) return;
+    const max = this.state.maxAnswerSeconds;
+    const remaining = Math.max(0, max - this.countdownElapsed);
+
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    this.countdownEl.textContent =
+      `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+
+    this.countdownEl.classList.toggle("recording-countdown-receding", remaining <= 15);
+    this.countdownEl.classList.toggle("recording-countdown-warning", remaining <= 5);
+
+    // Throttled aria-live cues for screen-reader users. Spamming every
+    // second is unusable; we milestone-announce instead.
+    if (
+      remaining === 60 ||
+      remaining === 30 ||
+      remaining === 15 ||
+      remaining === 10 ||
+      (remaining <= 5 && remaining > 0)
+    ) {
+      this._announce(`${remaining} seconds left to record.`);
+    }
+    if (remaining === 0) this._announce("Recording time is up.");
+  },
+
+  // Same shape as the announce() helper in think_time_countdown.js;
+  // duplicated here so each hook owns its dedupe state. Writes into
+  // the shared #countdown-announce aria-live region in the LV template.
+  _announce(text) {
+    const el = document.getElementById("countdown-announce");
+    if (!el) return;
+    const next = text === this._lastAnnouncement ? text + "​" : text;
+    el.textContent = next;
+    this._lastAnnouncement = text;
+  },
+
+  // --- Focus telemetry ------------------------------------------------
+  //
+  // Coalesce blur + visibilitychange events that fire in the same
+  // ~250ms window (some browsers — Safari especially — fire both on
+  // backgrounding). The server uses (response_id, occurred_at, kind)
+  // as a unique key so duplicate inserts no-op, but de-duping client-
+  // side keeps the channel cleaner.
+
+  fireFocusEvent(name) {
+    const now = Date.now();
+    if (this.lastFocusEventAt && now - this.lastFocusEventAt < 250) return;
+    this.lastFocusEventAt = now;
+    this.pushEvent(name, { at: new Date(now).toISOString() });
+  },
+
+  // --- Mic-level indicator --------------------------------------------
+  //
+  // After permission is granted, render a live audio level so the
+  // candidate can confirm their mic is being picked up. Drives a CSS
+  // custom property on the mic-level element via requestAnimationFrame
+  // — no LV roundtrip per frame.
+
+  startMicLevelLoop() {
+    if (!this.micLevelEl || !this.core) return;
+    if (this.micLevelFrame) return;
+    const tick = () => {
+      if (!this.core) return;
+      const level = this.core.getMicLevel(); // 0..1
+      // Normalize to a visually useful range — typical conversational
+      // speech sits around 0.05..0.20 RMS, so we scale to fill the bar
+      // at ~0.4 RMS to avoid a sluggish-looking meter.
+      const display = Math.min(1, level * 2.5);
+      this.micLevelEl.style.setProperty("--mic-level", display.toFixed(3));
+      // Mark "live" once we see a non-trivial signal — the candidate
+      // can use this as a quick visual confirmation.
+      this.micLevelEl.classList.toggle("mic-level-live", display > 0.04);
+      this.micLevelFrame = requestAnimationFrame(tick);
+    };
+    this.micLevelFrame = requestAnimationFrame(tick);
+  },
+
+  stopMicLevelLoop() {
+    if (this.micLevelFrame) {
+      cancelAnimationFrame(this.micLevelFrame);
+      this.micLevelFrame = null;
+    }
+    if (this.micLevelEl) {
+      this.micLevelEl.style.removeProperty("--mic-level");
+      this.micLevelEl.classList.remove("mic-level-live");
+    }
   },
 };
 

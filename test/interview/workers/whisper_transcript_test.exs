@@ -20,7 +20,10 @@ defmodule Interview.Workers.WhisperTranscriptTest do
 
   defp put_artifact!(storage_key) do
     src =
-      Path.join(System.tmp_dir!(), "interview_test_audio_#{System.unique_integer([:positive])}.mp4")
+      Path.join(
+        System.tmp_dir!(),
+        "interview_test_audio_#{System.unique_integer([:positive])}.mp4"
+      )
 
     File.write!(src, "fake mp4 bytes")
     {:ok, _} = Storage.put_artifact(storage_key, src)
@@ -104,7 +107,8 @@ defmodule Interview.Workers.WhisperTranscriptTest do
 
     mark_ready!(response)
 
-    assert {:error, :rate_limited} = perform_job(WhisperTranscript, %{"response_id" => response.id})
+    assert {:error, :rate_limited} =
+             perform_job(WhisperTranscript, %{"response_id" => response.id})
 
     r = Repo.get!(Response, response.id)
     assert is_nil(r.transcript_ready_at)

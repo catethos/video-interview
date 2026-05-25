@@ -1,0 +1,391 @@
+// ============================================
+// LATTICE PROMPT SESSION
+// Generated: 2026-05-20T14:22:29.672368Z
+// ============================================
+
+// REQUIRED INPUTS (set via Lattice.set_global before calling RunComplete):
+//   input_data           rows=100  sha256=06919677e11f5d3261a383106ae45d590a891d57509c8d58a8e535133b577a1f  "vi_samples_p1_100.csv"
+//   p2_results           rows=100  sha256=d63048cd706cb7c9e59b9248bf73fab329257fdbee445ffa9fabbca62f952670  "p2_results_for_p3_100row.csv"
+
+llm_config dynamic_config {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "google/gemini-3.1-flash-lite"
+  api_key_env: "OPENROUTER_API_KEY"
+  temperature: 0.0
+  max_tokens: 16000
+}
+
+type Layer1Score {
+  relevance_completeness: DimensionScore,
+  support_quality: DimensionScore,
+  clarity_coherence: DimensionScore
+}
+
+type DimensionScore {
+  score: Int @"0-5 on the dimension's rubric",
+  justification: String @"1-2 sentence evidence-based rationale citing transcript content only"
+}
+
+// LLM function for single row
+def GenerateOutput(job_role: String, job_description: String, question_number: String, question_text: String, answer_text: String, evidence: String, evidence_gaps: String, ambiguities: String) -> Layer1Score {
+  use: dynamic_config
+  prompt: """
+You are an expert interview evaluation assistant trained in organizational psychology and the scoring of structured interview response quality. You score one interview response at a time on universal response-quality dimensions using only the candidate's verbatim answer text and stage-P2 extracted evidence.
+
+You follow these principles:
+- Use ONLY content from the answer text and extracted evidence; do not infer personality, capability, motivation, or anything not stated
+- Do not consider tone, delivery, grammar, or language fluency
+- Be conservative when evidence is limited
+- This is speech-to-text from possibly non-native English speakers; garbled words in the transcript are legitimate content, not errors to correct
+
+For each dimension's justification, you:
+- Cite ONLY content from the answer or extracted evidence
+- Use tentative, evidence-based phrasing: "The response states...", "The candidate describes...", "This provides limited/moderate/strong response evidence because...", "The transcript does not provide clear response evidence of..."
+- Avoid trait-level overclaims: do NOT write "The candidate is clearly...", "This proves they are...", "They definitely have...", "Evidence of [trait]..."
+- Stay strictly on-scope for the dimension being justified; do not let support-quality concerns leak into relevance, do not let clarity concerns leak into support, do not let coverage concerns leak into clarity
+
+Score this single interview question's response on the 3 universal response-quality dimensions defined below: relevance_completeness, support_quality, and clarity_coherence. Each is scored 0-5 with a short justification.
+
+--------------------------------------------------
+DIMENSION 1: relevance_completeness  (score 0-5)
+--------------------------------------------------
+
+The extent to which the response directly addresses the question intent and covers the key components required by the question, without including irrelevant or distracting content.
+
+  0 = No answer or completely unrelated to the question
+  1 = Very weak alignment; most of the question is not addressed
+  2 = Partially aligned; some components addressed, but major gaps or irrelevant content
+  3 = Generally aligned; most components addressed, with minor gaps or slight irrelevance
+  4 = Strong alignment; all key components addressed with minimal irrelevant content
+  5 = Complete and precise alignment; all components addressed with clear focus
+
+Decision rules:
+- If any major part of the question is missing -> maximum score = 3
+- If response is generic but on-topic -> score <= 3
+- If clearly irrelevant content is included -> reduce score by 1 level
+
+--------------------------------------------------
+DIMENSION 2: support_quality  (score 0-5)
+--------------------------------------------------
+
+The extent to which the response is supported by explicit, concrete, and context-appropriate information — actions, reasoning, examples, or explanations — without evaluating the quality or effectiveness of those elements.
+
+  0 = No supporting information; entirely unsupported
+  1 = Very weak support; mostly generic or unsubstantiated statements
+  2 = Limited support; some specifics but incomplete, unclear, or insufficient
+  3 = Adequate support; includes relevant supporting detail but lacks depth or consistency
+  4 = Strong support; clear and consistent use of concrete details or reasoning
+  5 = Highly supported; detailed, explicit, and consistently substantiated throughout
+
+Decision rules:
+- If response contains only claims without examples or reasoning -> maximum score = 2
+- If support appears once but is not sustained -> score = 2-3
+- If multiple consistent supporting details are present -> score >= 4
+
+--------------------------------------------------
+DIMENSION 3: clarity_coherence  (score 0-5)
+--------------------------------------------------
+
+The extent to which the response is logically organized, internally consistent, and easy to follow in transcript form, with clear progression of ideas. This excludes fluency, grammar, or speaking style.
+
+  0 = Incoherent or unintelligible
+  1 = Very disorganized; difficult to follow
+  2 = Some structure present but inconsistent or confusing
+  3 = Generally logical; mostly clear and understandable with minor issues
+  4 = Well-structured; clear progression of ideas
+  5 = Highly structured; seamless, precise, and very easy to follow
+
+Decision rules:
+- If key parts are present but in confusing order -> maximum score = 2
+- If minor jumps in logic but still understandable -> score = 3
+- If ideas flow clearly from start to end -> score >= 4
+
+--------------------------------------------------
+EDGE CASE
+--------------------------------------------------
+
+If the extracted evidence fields appear empty or null, score based on the answer text alone and note the missing evidence as part of the support_quality justification.
+
+Return raw JSON only. Do NOT wrap in markdown code fences.
+
+
+JOB ROLE: ${job_role}
+JOB DESCRIPTION: ${job_description}
+
+QUESTION NUMBER: ${question_number}
+QUESTION TEXT: ${question_text}
+
+CANDIDATE'S ANSWER:
+${answer_text}
+
+EXTRACTED EVIDENCE (from stage P2, may have empty arrays):
+${evidence}
+
+EVIDENCE GAPS:
+${evidence_gaps}
+
+AMBIGUITIES:
+${ambiguities}
+
+  """
+}
+
+// Data Processing
+def ProcessData() {
+  SQL("""
+  SELECT
+    i.custom_id,
+    i.candidate_name,
+    i.job_role,
+    i.job_description,
+    CAST(q->>'question_number' AS INTEGER) AS question_number,
+    q->>'question_text' AS question_text,
+    q->>'answer_text' AS answer_text,
+    CAST(NULLIF(q->>'answer_confidence', '') AS DOUBLE) AS answer_confidence,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'evidence' AS VARCHAR) AS evidence,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'evidence_gaps' AS VARCHAR) AS evidence_gaps,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'ambiguities' AS VARCHAR) AS ambiguities
+  FROM input_data i
+  LEFT JOIN p2_results p2 USING (custom_id),
+  UNNEST(CAST(i.interview_transcript AS JSON[])) AS t(q)
+  """)
+}
+
+// Batch runner - applies LLM to all rows
+def RunBatch() {
+  ProcessData()
+  |> map_row("result", GenerateOutput($job_role, $job_description, $question_number, $question_text, $answer_text, $evidence, $evidence_gaps, $ambiguities))
+  |> explode("result")
+}
+// ============================================
+// METRICS EVALUATION
+// ============================================
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type ScopeResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P3v2_CheckDimensionScope(
+  clarity_coherence: Map<String, Any>,
+  relevance_completeness: Map<String, Any>,
+  support_quality: Map<String, Any>
+) -> ScopeResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether each dimension's justification stays on-scope for that dimension.
+
+The 3 dimensions have DISTINCT criteria:
+- Relevance & Completeness: did the answer address the question's intent and cover its key parts? (what was covered vs what was asked)
+- Support Quality: is the answer backed by concrete actions, examples, reasoning? (presence of concrete backing for whatever IS said)
+- Clarity & Coherence: is the response logically organized? (structural flow, sequence, transitions)
+
+Justifications to evaluate:
+1. Relevance & Completeness justification: {relevance_completeness["justification"]}
+2. Support Quality justification: {support_quality["justification"]}
+3. Clarity & Coherence justification: {clarity_coherence["justification"]}
+
+SCOPE (critical):
+Only evaluate whether each justification STAYS IN ITS LANE. Do NOT evaluate correctness of the score, grounding in evidence, or writing quality -- those are covered by other metrics. Only: is each justification using reasoning that belongs to its own dimension?
+
+WORDING vs LOGIC -- the key distinction:
+A word like "specific", "detail", "example", "clear", "elaboration" can appear in MULTIPLE dimensions and is NOT automatically a scope leak. Judge based on WHAT THE JUSTIFICATION IS ACTUALLY ARGUING, not on which words appear.
+
+ON-SCOPE (GOOD) examples:
+- Relevance: "addresses the challenge description but doesn't cover 'what did you learn'"
+  -> argues coverage of question parts -- ON-SCOPE
+- Relevance: "lacks specific details about the steps the candidate took to stay on track and what kept them motivated"
+  -> "specific details about [question parts]" = arguing the question's parts weren't fully covered -- ON-SCOPE for relevance
+- Support: "mentions challenges generically; no specific actions or outcomes described"
+  -> arguing absence of concrete backing -- ON-SCOPE for support
+- Support: "actions are described but lack concrete examples"
+  -> arguing concrete backing is thin -- ON-SCOPE for support
+- Clarity: "ideas flow from context to action to reflection in clear order"
+  -> arguing structural flow -- ON-SCOPE for clarity
+- Clarity: "the response has unclear phrases like X and Y, making the logical thread hard to follow"
+  -> arguing structural readability -- ON-SCOPE for clarity
+
+OFF-SCOPE (BAD) examples:
+- Support: "response jumps between topics and is hard to follow"
+  -> "jumps between topics / hard to follow" is arguing structural flow = a CLARITY concern -- OFF-SCOPE
+- Clarity: "doesn't answer the 'what did you learn' part of the question"
+  -> arguing question coverage = a RELEVANCE concern -- OFF-SCOPE
+- Clarity: "lack of elaboration on methods results in coherence issues"
+  -> arguing content depth (a SUPPORT concern) is being attributed to coherence -- OFF-SCOPE
+- Relevance: "the response uses casual tone which weakens its alignment"
+  -> arguing tone (not coverage) -- OFF-SCOPE
+
+KEY HEURISTIC:
+- "Did the justification critique the RIGHT THING for its dimension?" -> if yes, on-scope, even if it borrows shared vocabulary.
+- A shared word like "specific" or "clear" is ON-SCOPE if the noun it modifies (e.g., "specific details about [question topic]" vs "specific examples [as backing]") fits the dimension.
+- When in doubt, give the BENEFIT OF THE DOUBT -- only flag CLEAR cross-dimension reasoning leaks, not vocabulary overlap.
+
+Scoring rules:
+- Score 1 if ALL THREE justifications argue concerns that fit their own dimension (vocabulary overlap is OK).
+- Score 0 ONLY if a justification's actual argument belongs to a different dimension.
+
+In your reason, cite the offending justification AND name which dimension it actually belongs to, if any. If you're scoring 0 due to vocabulary alone (without a clear argument leak), reconsider and score 1 instead.
+  """
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type GroundednessResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P3v2_CheckJustificationGrounded(
+  answer_text: String,
+  clarity_coherence: Map<String, Any>,
+  evidence: String,
+  relevance_completeness: Map<String, Any>,
+  support_quality: Map<String, Any>
+) -> GroundednessResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the justifications for each of 3 scoring dimensions are grounded in the candidate's answer or the extracted evidence -- not hallucinated or invented.
+
+Candidate's answer to the question:
+{answer_text}
+
+Extracted evidence from that answer (from stage P2, may be empty arrays):
+{evidence}
+
+Justifications to evaluate:
+1. Relevance & Completeness justification: {relevance_completeness["justification"]}
+2. Support Quality justification: {support_quality["justification"]}
+3. Clarity & Coherence justification: {clarity_coherence["justification"]}
+
+SCOPE (critical):
+Only evaluate whether each justification's claims can be traced to content in the candidate's answer OR the extracted evidence above. Do NOT evaluate whether the SCORE is right. Do NOT evaluate whether the justification is well-written. Only: is it GROUNDED?
+
+IMPORTANT CONTEXT:
+This is speech-to-text from non-native English speakers. Transcripts contain garbled words. A justification that cites garbled content from the transcript is still GROUNDED.
+
+GROUNDED (score 1) examples:
+- Justification says "response addresses challenge but omits 'what did you learn' part"
+  -> and candidate's answer omits lessons learned -> GROUNDED
+- Justification says "cites Power BI dashboard and stock cover analysis"
+  -> and evidence includes these items -> GROUNDED
+- Justification says "no quantitative outcomes mentioned"
+  -> and evidence.outcomes array is empty -> GROUNDED
+
+NOT GROUNDED (score 0) examples:
+- Justification says "response shows strong leadership"
+  -> but candidate's answer never mentions leadership -> HALLUCINATED
+- Justification says "candidate used Excel for the analysis"
+  -> but the answer and evidence mention no tool -> FABRICATED
+- Justification says "candidate expressed passion for the role"
+  -> but answer contains no such statement -> INVENTED
+
+Scoring rules:
+- Score 1 if ALL THREE justifications make claims traceable to the answer or evidence.
+- Score 0 if ANY justification makes claims not traceable.
+- Meta-statements like "the transcript does not provide clear evidence of X" are valid when X is indeed absent -- count as GROUNDED.
+
+In your reason, cite the specific justification and the ungrounded claim, if any.
+  """
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type HedgedResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P3v2_CheckJustificationHedged(
+  clarity_coherence: Map<String, Any>,
+  relevance_completeness: Map<String, Any>,
+  support_quality: Map<String, Any>
+) -> HedgedResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the 3 dimension justifications use evidence-based, tentative language rather than overclaiming traits, capabilities, or states of mind.
+
+Justifications to evaluate:
+1. Relevance & Completeness: {relevance_completeness["justification"]}
+2. Support Quality: {support_quality["justification"]}
+3. Clarity & Coherence: {clarity_coherence["justification"]}
+
+SCOPE (critical):
+Only evaluate the TONE and LANGUAGE of the justifications. Do NOT evaluate whether the score is correct. Do NOT evaluate whether claims are grounded. Only: is the language tentative and evidence-based, or overclaiming?
+
+ACCEPTABLE (score 1) phrasing:
+- "The response states..."
+- "The candidate describes..."
+- "The transcript does not provide clear evidence of..."
+- "This provides limited/moderate/strong response evidence because..."
+- "Ideas flow clearly from context to action" (descriptive, about response structure)
+- "The response is clearly organized" (describing the response, not the candidate)
+
+NOT ACCEPTABLE (score 0) phrasing:
+- "The candidate is clearly motivated..." (trait overclaim)
+- "This proves they are a strong leader..." (certainty overclaim)
+- "They definitely have strong communication skills..." (capability overclaim)
+- "Evidence of strong analytical ability..." (trait inference)
+- "The candidate obviously understands the role..." (certainty overclaim)
+- "Demonstrates exceptional leadership..." (trait overclaim without evidence)
+
+KEY RULE:
+The word "clearly" is ACCEPTABLE when describing HOW the response is structured or written ("flows clearly", "clearly organized"). It is NOT ACCEPTABLE when claiming a trait about the candidate ("the candidate is clearly confident").
+
+Same applies to other descriptive words -- evaluate based on whether the phrase attributes a trait/capability/state-of-mind to the candidate, or describes observable response structure.
+
+Scoring rules:
+- Score 1 if ALL THREE justifications use tentative, evidence-based language (cite response content, avoid trait overclaims).
+- Score 0 if ANY justification makes trait-level overclaims about the candidate.
+
+In your reason, cite the overclaiming phrase, if any.
+  """
+}
+
+def P3v2_CheckJustificationsNonEmpty(
+  clarity_coherence: Map<String, Any>,
+  relevance_completeness: Map<String, Any>,
+  support_quality: Map<String, Any>
+) {
+  let r = relevance_completeness["justification"]
+  let s = support_quality["justification"]
+  let c = clarity_coherence["justification"]
+  len(r) >= 20 && len(s) >= 20 && len(c) >= 20
+}
+
+def P3v2_CheckScoresInRange(
+  clarity_coherence: Map<String, Any>,
+  relevance_completeness: Map<String, Any>,
+  support_quality: Map<String, Any>
+) {
+  let r = relevance_completeness["score"]
+  let s = support_quality["score"]
+  let c = clarity_coherence["score"]
+  r >= 0 && r <= 5 && s >= 0 && s <= 5 && c >= 0 && c <= 5
+}
+
+// Complete pipeline: generate outputs and evaluate metrics
+def RunComplete() {
+  RunBatch()
+  |> map_row("p3v2_checkdimensionscope", P3v2_CheckDimensionScope($clarity_coherence, $relevance_completeness, $support_quality))
+  |> map_row("p3v2_checkjustificationgrounded", P3v2_CheckJustificationGrounded($answer_text, $clarity_coherence, $evidence, $relevance_completeness, $support_quality))
+  |> map_row("p3v2_checkjustificationhedged", P3v2_CheckJustificationHedged($clarity_coherence, $relevance_completeness, $support_quality))
+  |> map_row("p3v2_checkjustificationsnonempty", P3v2_CheckJustificationsNonEmpty($clarity_coherence, $relevance_completeness, $support_quality))
+  |> map_row("p3v2_checkscoresinrange", P3v2_CheckScoresInRange($clarity_coherence, $relevance_completeness, $support_quality))
+}

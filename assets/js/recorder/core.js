@@ -144,6 +144,7 @@ export class RecorderCore {
       });
       this.stream = stream;
       if (this.preview) this.preview.srcObject = stream;
+      this._setupAudioAnalyser(stream);
       this.onEvent("permission", { state: "granted" });
       return true;
     } catch (err) {
@@ -160,12 +161,74 @@ export class RecorderCore {
     if (this.recorder && this.recorder.state !== "inactive") {
       try { this.recorder.stop(); } catch (_) {}
     }
+    this._teardownAudioAnalyser();
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop());
       this.stream = null;
     }
     if (this.preview) this.preview.srcObject = null;
     this.onEvent("permission", { state: "released" });
+  }
+
+  // --- Mic-level analyser ---------------------------------------------
+  //
+  // Lets the candidate see their mic is actually picking them up before
+  // they commit to recording. Cheap: one AnalyserNode reading the audio
+  // track's time-domain data. We expose `getMicLevel()` returning a
+  // [0..1] RMS amplitude that the host (hook) renders to the DOM via
+  // requestAnimationFrame — pushing per-frame audio levels through the
+  // LV channel would be wasteful.
+
+  _setupAudioAnalyser(stream) {
+    if (!stream) return;
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) return;
+
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      this.audioCtx = new AC();
+      this.audioSource = this.audioCtx.createMediaStreamSource(stream);
+      this.audioAnalyser = this.audioCtx.createAnalyser();
+      this.audioAnalyser.fftSize = 1024;
+      this.audioSamples = new Uint8Array(this.audioAnalyser.fftSize);
+      this.audioSource.connect(this.audioAnalyser);
+      // Note: do NOT connect the analyser to audioCtx.destination — the
+      // candidate would hear themselves echo. AnalyserNode reads the
+      // graph without needing an output sink.
+    } catch (err) {
+      // Web Audio not available / blocked — the level just stays at 0.
+      // Not worth surfacing as an error; mic still records.
+      this._teardownAudioAnalyser();
+    }
+  }
+
+  _teardownAudioAnalyser() {
+    try {
+      if (this.audioSource) this.audioSource.disconnect();
+      if (this.audioCtx && this.audioCtx.state !== "closed") this.audioCtx.close();
+    } catch (_) {
+      /* ignore — releasing best-effort */
+    }
+    this.audioSource = null;
+    this.audioAnalyser = null;
+    this.audioCtx = null;
+    this.audioSamples = null;
+  }
+
+  // Returns the current mic input level as a 0..1 RMS amplitude. Cheap
+  // enough to call per animation frame. Returns 0 if no analyser (no
+  // mic permission yet, or Web Audio unavailable).
+  getMicLevel() {
+    if (!this.audioAnalyser || !this.audioSamples) return 0;
+    this.audioAnalyser.getByteTimeDomainData(this.audioSamples);
+    // Samples are 0..255 centered at 128. Compute deviation RMS.
+    let sumSquares = 0;
+    for (let i = 0; i < this.audioSamples.length; i++) {
+      const v = (this.audioSamples[i] - 128) / 128;
+      sumSquares += v * v;
+    }
+    return Math.sqrt(sumSquares / this.audioSamples.length);
   }
 
   // --- Recorder lifecycle --------------------------------------------

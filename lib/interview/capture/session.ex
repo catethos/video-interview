@@ -23,6 +23,11 @@ defmodule Interview.Capture.Session do
     field :bootstrap_jti, :binary_id
     field :bootstrap_consumed_at, :utc_datetime_usec
     field :external_id, :string
+    # Consumer-supplied job context (passthrough, like external_id). The
+    # talent-app owns the job; VI holds these to feed the scoring pipeline
+    # (job_role → P1 prompt; job_description → P2-P5).
+    field :job_role, :string
+    field :job_description, :string
     field :deleted_at, :utc_datetime_usec
 
     belongs_to :tenant, Interview.Tenants.Tenant
@@ -54,6 +59,8 @@ defmodule Interview.Capture.Session do
       :bootstrap_jti,
       :bootstrap_consumed_at,
       :external_id,
+      :job_role,
+      :job_description,
       :deleted_at
     ])
     |> validate_required([:tenant_id, :template_version_id])

@@ -27,12 +27,13 @@ import topbar from "../vendor/topbar"
 import Recorder from "./hooks/recorder"
 import RecruiterRecorder from "./hooks/recruiter_recorder"
 import AttachmentForm from "./hooks/attachment_form"
+import ThinkTimeCountdown from "./hooks/think_time_countdown"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, Recorder, RecruiterRecorder, AttachmentForm},
+  hooks: {...colocatedHooks, Recorder, RecruiterRecorder, AttachmentForm, ThinkTimeCountdown},
 })
 
 // Show progress bar on live navigation and form submits

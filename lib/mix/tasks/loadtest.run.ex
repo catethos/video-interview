@@ -113,10 +113,10 @@ defmodule Mix.Tasks.Loadtest.Run do
       {~c"content-type", ~c"application/json"}
     ]
 
-    case :httpc.request(:post, {String.to_charlist(url), headers, ~c"application/json", body},
-           [timeout: 10_000],
-           body_format: :binary
-         ) do
+    case :httpc.request(
+           :post,
+           {String.to_charlist(url), headers, ~c"application/json", body},
+           [timeout: 10_000], body_format: :binary) do
       {:ok, {{_, 201, _}, _, body}} ->
         {:ok, Jason.decode!(body)}
 

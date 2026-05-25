@@ -158,6 +158,104 @@ defmodule Interview.Capture do
   end
 
   @doc """
+  Has the candidate begun answering on this session yet?
+
+  Used by the capture LiveView to distinguish a fresh landing (show
+  the intro/disclosure gate) from a mid-interview reload (skip the
+  gate and go straight to the current question). The session row's
+  `state` field is set to `"in_progress"` at creation time so it
+  isn't a useful signal on its own — `any_responses?/1` is.
+  """
+  def any_responses?(session_id) when is_binary(session_id) do
+    Repo.exists?(from(r in Response, where: r.session_id == ^session_id))
+  end
+
+  # ---- Focus telemetry ----------------------------------------------------
+  #
+  # Soft cheating signal: how many times did the candidate's tab lose
+  # focus while they were recording? Persisted per response so the
+  # recruiter dashboard can show "left tab 2× during this answer".
+  # NOT used in the AI scoring pipeline — purely informational.
+
+  @doc """
+  Record a focus event for a (response, kind, occurred_at). Idempotent
+  on the natural key (the JS hook may double-fire on browsers that
+  emit blur + visibilitychange together).
+
+  Returns `:ok` on insert, `{:error, :invalid}` on validation failure,
+  and `:ok` on conflict (already recorded).
+  """
+  def record_focus_event(response_id, kind, %DateTime{} = occurred_at)
+      when is_binary(response_id) and kind in ["lost", "regained"] do
+    changeset =
+      Interview.Capture.FocusEvent.changeset(%Interview.Capture.FocusEvent{}, %{
+        response_id: response_id,
+        kind: kind,
+        occurred_at: occurred_at
+      })
+
+    case Repo.insert(changeset, on_conflict: :nothing) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, :invalid}
+    end
+  end
+
+  def record_focus_event(_, _, _), do: {:error, :invalid}
+
+  @doc """
+  Count "lost" focus events for a response. "Regained" events are
+  paired diagnostics, not weighted — what matters is how many times
+  the candidate's attention left, not whether they came back.
+  """
+  def count_focus_losses(response_id) when is_binary(response_id) do
+    Repo.aggregate(
+      from(f in Interview.Capture.FocusEvent,
+        where: f.response_id == ^response_id and f.kind == "lost"
+      ),
+      :count
+    )
+  end
+
+  @doc """
+  Summary of focus-loss events for a response: count of "lost" events
+  + total milliseconds the candidate's tab was unfocused. We walk the
+  events in chronological order and pair each "lost" with the next
+  "regained"; the duration between them is added to the total.
+
+  Unpaired "lost" events (last event was "lost" with no following
+  "regained" — candidate closed the tab, or never returned) still
+  count toward the `count` but contribute zero to `total_ms`. We
+  could synthesize an end timestamp from the response's
+  `finalized_at`, but the count alone is the meaningful signal there.
+  """
+  def focus_loss_summary(response_id) when is_binary(response_id) do
+    events =
+      from(f in Interview.Capture.FocusEvent,
+        where: f.response_id == ^response_id,
+        order_by: f.occurred_at,
+        select: {f.kind, f.occurred_at}
+      )
+      |> Repo.all()
+
+    {count, total_ms, _open_lost_at} =
+      Enum.reduce(events, {0, 0, nil}, fn
+        {"lost", at}, {count, total, _prev_lost} ->
+          {count + 1, total, at}
+
+        {"regained", at}, {count, total, prev_lost} when not is_nil(prev_lost) ->
+          diff = DateTime.diff(at, prev_lost, :millisecond)
+          {count, total + max(diff, 0), nil}
+
+        {"regained", _at}, acc ->
+          # Unpaired "regained" with no prior "lost" — probably a
+          # browser event order artifact; ignore.
+          acc
+      end)
+
+    %{count: count, total_ms: total_ms}
+  end
+
+  @doc """
   Claim (or refresh) the writer for a `(session, question, attempt)`.
 
   Behaviour (PLAN §5.1):
@@ -590,6 +688,7 @@ defmodule Interview.Capture do
           updated = Repo.get!(Session, session_id)
           _ = Interview.Webhooks.enqueue(updated, "session.ready")
           broadcast_session_state(updated)
+          maybe_enqueue_scoring(updated)
         end
 
         :ok
@@ -604,6 +703,24 @@ defmodule Interview.Capture do
   per PLAN §12.5 — never the Postgres LISTEN/NOTIFY adapter over Neon.
   """
   def session_topic(session_id) when is_binary(session_id), do: "session:" <> session_id
+
+  # Enqueue scoring on the submitted→ready transition (fires once). Whisper
+  # transcripts are still landing at this point, so the worker snoozes via
+  # ScoringExport :not_ready until they're in — we enqueue here rather than
+  # gate on transcript readiness (rollup runs at finalize, before Whisper, so
+  # a readiness gate would never fire). Skip entirely when transcripts are
+  # off: scoring needs answer_text, so without them the worker would snooze
+  # forever. The worker's `unique` collapses any duplicate enqueue.
+  defp maybe_enqueue_scoring(%Session{} = session) do
+    if Interview.Transcripts.enabled?() do
+      _ =
+        %{session_id: session.id}
+        |> Interview.Workers.ScorePipeline.new()
+        |> Oban.insert()
+    end
+
+    :ok
+  end
 
   defp broadcast_session_state(%Session{} = session) do
     Phoenix.PubSub.broadcast(

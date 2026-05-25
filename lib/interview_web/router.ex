@@ -50,6 +50,14 @@ defmodule InterviewWeb.Router do
     plug InterviewWeb.Plugs.RecruiterAuth
   end
 
+  # Token-authenticated browser routes for signed playback URLs (PLAN
+  # §8.5 change 3). No session, no cookie — auth happens entirely via
+  # the `?token=...` query param verified inside the controller. This
+  # lets an external recruiter dashboard embed `<video src=...>` with
+  # a Pulsifi-minted signed URL.
+  pipeline :signed_playback do
+  end
+
   # Recruiter-authenticated form POSTs (multipart). Cookie session + CSRF
   # required — these handle multipart file uploads from the recruiter
   # dashboard.
@@ -69,10 +77,12 @@ defmodule InterviewWeb.Router do
     get "/auth/sign-in", AuthController, :sign_in
     post "/auth/sign-in", AuthController, :request_link_form
     get "/auth/magic-link/:token", MagicLinkController, :consume
+    get "/auth/handoff", RecruiterHandoffController, :consume
     delete "/auth/sign-out", AuthController, :sign_out
 
     live_session :recruiter, on_mount: [{InterviewWeb.UserAuth, :ensure_recruiter}] do
       live "/recruiter/templates", RecruiterTemplatesLive, :index
+      live "/recruiter/templates/new", RecruiterTemplateNewLive
       live "/recruiter/templates/:id", RecruiterTemplateLive
       live "/recruiter/templates/:tid/questions/:qid/prompt", RecruiterPromptRecorderLive
       live "/recruiter/sessions", RecruiterSessionsLive, :index
@@ -87,6 +97,12 @@ defmodule InterviewWeb.Router do
     pipe_through :recruiter_browser
 
     get "/recruiter/playback/:response_id", PlaybackController, :show
+  end
+
+  scope "/", InterviewWeb do
+    pipe_through :signed_playback
+
+    get "/playback/:response_id", PlaybackController, :show_signed
   end
 
   scope "/", InterviewWeb do
@@ -137,6 +153,10 @@ defmodule InterviewWeb.Router do
   # filter, so we can serve video/image/pdf.
   scope "/capture", InterviewWeb do
     get "/:session_id/prompt_assets/:asset_id", PromptAssetPlaybackController, :show
+
+    get "/:session_id/prompt_assets/:asset_id/captions.vtt",
+        PromptAssetPlaybackController,
+        :captions
   end
 
   scope "/api/prompt_assets", InterviewWeb do
@@ -163,6 +183,9 @@ defmodule InterviewWeb.Router do
     post "/sessions", SessionController, :create
     post "/sessions/:id/bootstrap", SessionController, :rebootstrap
     delete "/sessions/:id", SessionController, :delete
+    get "/sessions/:id/scoring_export", ScoringExportController, :show
+    post "/responses/:id/playback_url", PlaybackUrlController, :create
+    post "/recruiter-handoffs", RecruiterHandoffController, :create
   end
 
   # Chrome DevTools probes this URL when DevTools is open. Return 204 so

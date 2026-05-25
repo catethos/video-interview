@@ -112,7 +112,11 @@ defmodule InterviewWeb.RecruiterPromptRecorderLive do
     {:noreply, socket}
   end
 
-  def handle_event("buffer_progress", %{"bytesBuffered" => bytes_b, "bytesUploaded" => bytes_u}, socket) do
+  def handle_event(
+        "buffer_progress",
+        %{"bytesBuffered" => bytes_b, "bytesUploaded" => bytes_u},
+        socket
+      ) do
     {:noreply,
      socket
      |> assign(:bytes_buffered, bytes_b)
@@ -177,8 +181,7 @@ defmodule InterviewWeb.RecruiterPromptRecorderLive do
              |> push_navigate(to: ~p"/recruiter/templates/#{socket.assigns.template.id}")}
 
           {:error, :published_immutable} ->
-            {:noreply,
-             put_flash(socket, :error, "This version is published — open a new draft.")}
+            {:noreply, put_flash(socket, :error, "This version is published — open a new draft.")}
 
           {:error, _changeset} ->
             {:noreply, put_flash(socket, :error, "Failed to attach prompt asset.")}

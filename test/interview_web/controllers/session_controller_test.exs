@@ -52,6 +52,27 @@ defmodule InterviewWeb.SessionControllerTest do
       assert {:error, :consumed} = Bootstrap.consume(token)
     end
 
+    test "stores consumer-supplied job_role + job_description on the session",
+         %{conn: conn, secret: secret, template: template} do
+      conn =
+        conn
+        |> authed_conn(secret)
+        |> post(
+          ~p"/api/sessions",
+          Jason.encode!(%{
+            "template_id" => template.id,
+            "job_role" => "Management Trainee - Data",
+            "job_description" => "Drives data projects across functions under deadline."
+          })
+        )
+
+      assert %{"id" => sid} = json_response(conn, 201)
+
+      session = Repo.get!(Session, sid)
+      assert session.job_role == "Management Trainee - Data"
+      assert session.job_description == "Drives data projects across functions under deadline."
+    end
+
     test "creates a session with explicit template_version_id",
          %{conn: conn, secret: secret, version: version} do
       conn =

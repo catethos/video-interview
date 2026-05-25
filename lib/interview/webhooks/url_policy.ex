@@ -111,10 +111,14 @@ defmodule Interview.Webhooks.URLPolicy do
     host = String.downcase(host)
 
     cond do
-      host in @denied_hostnames -> {:error, :hostname_denied}
+      host in @denied_hostnames ->
+        {:error, :hostname_denied}
+
       Enum.any?(@denied_hostname_suffixes, &String.ends_with?(host, &1)) ->
         {:error, :hostname_denied}
-      true -> :ok
+
+      true ->
+        :ok
     end
   end
 
@@ -146,7 +150,9 @@ defmodule Interview.Webhooks.URLPolicy do
 
   defp resolve_and_check(host) do
     case :inet.getaddrs(String.to_charlist(host), :inet) do
-      {:ok, []} -> {:error, :dns_no_records}
+      {:ok, []} ->
+        {:error, :dns_no_records}
+
       {:ok, addrs} ->
         if Enum.all?(addrs, &public_ip?/1) do
           :ok
@@ -154,7 +160,8 @@ defmodule Interview.Webhooks.URLPolicy do
           {:error, :private_ip_disallowed}
         end
 
-      {:error, reason} -> {:error, {:dns_lookup_failed, reason}}
+      {:error, reason} ->
+        {:error, {:dns_lookup_failed, reason}}
     end
   end
 

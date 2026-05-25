@@ -1,0 +1,598 @@
+// ============================================
+// LATTICE PROMPT SESSION
+// Generated: 2026-05-22T16:16:16.817590Z
+// ============================================
+
+// REQUIRED INPUTS (set via Lattice.set_global before calling RunComplete):
+//   input_data           rows=?  sha256=(no hash)  "vi_samples_p1_100.csv"
+//   p1_results           rows=?  sha256=(no hash)  "p1_results_from_ea28004b_100row.csv"
+//   p2_results           rows=?  sha256=(no hash)  "p2_results_for_p3_100row.csv"
+
+llm_config dynamic_config {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "google/gemini-3.1-flash-lite"
+  api_key_env: "OPENROUTER_API_KEY"
+  temperature: 0.0
+  max_tokens: 16000
+}
+
+type Layer2Output {
+  layer2_scores: Map<String, DimensionScore>
+}
+
+type DimensionScore {
+  score: Int @"0-5 on the dimension's rubric",
+  justification: String @"1-2 sentence evidence-based rationale citing transcript and evidence content only"
+}
+
+// LLM function for single row
+def GenerateOutput(job_role: String, job_description: String, question_number: String, question_text: String, question_type: String, target_constructs: String, answer_text: String, evidence: String, evidence_gaps: String, ambiguities: String) -> Layer2Output {
+  use: dynamic_config
+  prompt: """
+You are an expert interview evaluation assistant trained in organizational psychology and the scoring of structured interview response quality. Your goal is to produce fair, evidence-based, standardized, transcript-only interview scoring.
+
+CORE PRINCIPLES
+
+1. Evidence-only rule
+- Score only what is explicitly stated in the transcript and response evidence.
+- Do not assume unstated actions, motives, outcomes, or capabilities.
+- If response evidence is missing, score conservatively.
+
+2. Question-intent anchoring rule
+- Score only dimensions relevant to the question_type.
+- Do not score irrelevant competencies.
+
+3. Conservative interpretation rule
+- If response evidence is partial, ambiguous, or mixed, use a mid-range score.
+- If response evidence is weak or absent, use a low score.
+- Never fill gaps with speculation.
+
+4. No construct leakage
+- Do not infer personality from one answer.
+- Do not infer job fit from a generic answer unless the candidate explicitly links it to the role.
+- Do not infer leadership, learning agility, resilience, integrity, or motivation unless directly evidenced in the transcript.
+
+JUSTIFICATION DISCIPLINE
+For each dimension, write a brief evidence-based justification that:
+- Cites ONLY content from the answer or extracted evidence
+- Distinguishes what is explicit vs inferred
+- Avoids trait-level overclaims
+
+Use phrases such as: "The response states...", "The candidate describes...", "This provides limited/moderate/strong response evidence because...", "The transcript does not provide clear response evidence of..."
+
+Do NOT say: "The candidate is clearly...", "This proves they are...", "They definitely have...", "Evidence of [trait]..."
+
+IMPORTANT CONTEXT
+- This is speech-to-text from possibly non-native English speakers. Garbled words in the transcript are legitimate content, not errors to correct.
+
+INPUT USAGE RULE
+- "question_type" and "target_constructs" are PROVIDED inputs from upstream classification.
+- You MUST use them as given.
+- You MUST NOT modify, reinterpret, or reclassify them.
+- You MUST NOT introduce new constructs.
+
+DIMENSION RUBRICS BY QUESTION TYPE
+
+Use ONLY the rubric matching the row's question_type. Score each listed dimension 0-5.
+
+1. behavioral — score: behavioral_evidence, action_effectiveness, outcome_effectiveness
+
+A. behavioral_evidence (how clearly and specifically the candidate describes their actions and role)
+0 = No relevant example or no actions
+1 = Very vague actions, unclear role
+2 = Some actions, unclear ownership
+3 = Clear actions, moderate detail
+4 = Specific actions with clear ownership
+5 = Highly detailed, fully evaluable actions
+
+B. action_effectiveness (how appropriate and effective the actions are)
+0 = Inappropriate or missing actions
+1 = Weak or misaligned actions
+2 = Partially appropriate, clear gaps
+3 = Generally appropriate
+4 = Effective and well-chosen actions
+5 = Highly effective and well-judged actions
+
+C. outcome_effectiveness (how relevant and impactful the outcomes are)
+0 = No or negative outcome
+1 = Outcome unclear or unrelated
+2 = Limited impact
+3 = Moderately positive outcome
+4 = Clear and meaningful outcome
+5 = Strong, impactful, clearly attributable outcome
+
+2. situational — score: decision_quality, rationale_quality
+
+A. decision_quality (appropriateness/feasibility of proposed action)
+0 = No or inappropriate decision
+1 = Unrealistic or poorly aligned
+2 = Partially appropriate with gaps
+3 = Generally appropriate
+4 = Appropriate and feasible
+5 = Highly appropriate and comprehensive
+
+B. rationale_quality (logic of justification, trade-offs, consequences)
+0 = No rationale
+1 = Illogical or weak rationale
+2 = Limited or incomplete reasoning
+3 = Reasonable reasoning
+4 = Strong logic with trade-offs
+5 = Highly robust reasoning with full consideration
+
+3. technical_job_knowledge — score: technical_accuracy, applied_understanding
+
+A. technical_accuracy (factual correctness of concepts/procedures)
+0 = Completely incorrect
+1 = Mostly incorrect
+2 = Partially correct with errors
+3 = Generally correct
+4 = Accurate with minimal errors
+5 = Fully accurate and precise
+
+B. applied_understanding (effectiveness of applying knowledge to work contexts)
+0 = No application
+1 = Incorrect application
+2 = Limited or vague application
+3 = Reasonable application
+4 = Clear and appropriate application
+5 = Highly practical and well-integrated application
+
+4. analytical_problem_solving — score: analytical_reasoning_quality, solution_quality
+
+A. analytical_reasoning_quality (logical consistency and prioritization)
+0 = No or incoherent reasoning
+1 = Flawed reasoning
+2 = Partial reasoning with gaps
+3 = Generally logical reasoning
+4 = Strong and structured reasoning
+5 = Highly rigorous and comprehensive reasoning
+
+B. solution_quality (relevance and usefulness of conclusions)
+0 = No or irrelevant solution
+1 = Inappropriate solution
+2 = Weak or incomplete solution
+3 = Reasonable solution
+4 = Strong and practical solution
+5 = Highly effective and insightful solution
+
+5. background_experience — score: experience_relevance, evidence_of_responsibility
+
+A. experience_relevance (alignment of experience to job)
+0 = No relevant experience
+1 = Very weak relevance
+2 = Some relevance
+3 = Moderate relevance
+4 = Strong relevance
+5 = Highly aligned experience
+
+B. evidence_of_responsibility (ownership of actions and outcomes)
+0 = No responsibility
+1 = Minimal ownership
+2 = Limited responsibility
+3 = Moderate responsibility
+4 = Clear ownership
+5 = High ownership with significant scope
+
+6. motivation_self_description — score: role_alignment
+
+A. role_alignment (alignment of stated motivations to role demands per job description)
+0 = No alignment
+1 = Very generic
+2 = Limited alignment
+3 = Moderate alignment
+4 = Clear alignment
+5 = Strong, specific alignment
+
+Important: Do not infer "passion", "drive", or "culture fit" unless directly evidenced.
+
+7. other — score: 1 to 3 custom dimensions
+
+If the question does not fit clearly into the 6 types above, define up to 3 custom dimension keys (snake_case). Each custom dimension must be:
+- directly tied to the question intent
+- clearly defined by its name
+- evidence-based
+- NOT addressing response-quality dimensions (relevance, completeness, clarity, coherence, support quality) — those are handled by Layer 1 scoring upstream.
+
+Use snake_case keys; do not collide with the standard dimension names listed above.
+
+OUTPUT
+Use ONLY the dimensions listed for the row's question_type as keys in layer2_scores. For each dimension, return {score: Int 0-5, justification: String}. Return raw JSON only — no markdown fences.
+
+
+JOB ROLE: ${job_role}
+
+JOB DESCRIPTION:
+${job_description}
+
+QUESTION_NUMBER: ${question_number}
+QUESTION_TEXT: ${question_text}
+QUESTION_TYPE: ${question_type}
+TARGET_CONSTRUCTS: ${target_constructs}
+
+CANDIDATE'S ANSWER:
+${answer_text}
+
+EXTRACTED EVIDENCE (P2):
+evidence: ${evidence}
+evidence_gaps: ${evidence_gaps}
+ambiguities: ${ambiguities}
+
+Score this answer using ONLY the rubric for question_type "${question_type}". Output the layer2_scores map per the schema appended below.
+
+  """
+}
+
+// Data Processing
+def ProcessData() {
+  SQL("""
+  SELECT
+    i.custom_id,
+    i.job_role,
+    i.job_description,
+    i.interview_transcript,
+    CAST(q->>'question_number' AS INTEGER) AS question_number,
+    q->>'question_text' AS question_text,
+    q->>'answer_text' AS answer_text,
+    CAST(NULLIF(q->>'answer_confidence', '') AS DOUBLE) AS answer_confidence,
+    list_filter(CAST(p1.classifications AS JSON[]), x -> CAST(x->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->>'question_type' AS question_type,
+    list_filter(CAST(p1.classifications AS JSON[]), x -> CAST(x->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->>'question_type_rationale' AS question_type_rationale,
+    CAST(list_filter(CAST(p1.classifications AS JSON[]), x -> CAST(x->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'target_constructs' AS VARCHAR) AS target_constructs,
+    list_filter(CAST(p1.classifications AS JSON[]), x -> CAST(x->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->>'target_constructs_rationale' AS target_constructs_rationale,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'evidence' AS VARCHAR) AS evidence,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'evidence_gaps' AS VARCHAR) AS evidence_gaps,
+    CAST(list_filter(CAST(p2.question_evidences AS JSON[]), e -> CAST(e->>'question_number' AS INTEGER) = CAST(q->>'question_number' AS INTEGER))[1]->'ambiguities' AS VARCHAR) AS ambiguities
+  FROM input_data i
+  LEFT JOIN p1_results p1 USING (template_version_id)
+  LEFT JOIN p2_results p2 USING (custom_id),
+  UNNEST(CAST(i.interview_transcript AS JSON[])) AS t(q)
+  ORDER BY i.custom_id, question_number
+  """)
+}
+
+// Batch runner - applies LLM to all rows
+def RunBatch() {
+  ProcessData()
+  |> map_row("result", GenerateOutput($job_role, $job_description, $question_number, $question_text, $question_type, $target_constructs, $answer_text, $evidence, $evidence_gaps, $ambiguities))
+  |> explode("result")
+}
+// ============================================
+// METRICS EVALUATION
+// ============================================
+
+def P4v2_CheckScoresInRange(
+  layer2_scores: Map<String, Any>,
+  question_type: String
+) {
+  if question_type == "behavioral" {
+    let s1 = layer2_scores["behavioral_evidence"]["score"]
+    let s2 = layer2_scores["action_effectiveness"]["score"]
+    let s3 = layer2_scores["outcome_effectiveness"]["score"]
+    s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5 && s3 >= 0 && s3 <= 5
+  } else if question_type == "situational" {
+    let s1 = layer2_scores["decision_quality"]["score"]
+    let s2 = layer2_scores["rationale_quality"]["score"]
+    s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5
+  } else if question_type == "technical_job_knowledge" {
+    let s1 = layer2_scores["technical_accuracy"]["score"]
+    let s2 = layer2_scores["applied_understanding"]["score"]
+    s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5
+  } else if question_type == "analytical_problem_solving" {
+    let s1 = layer2_scores["analytical_reasoning_quality"]["score"]
+    let s2 = layer2_scores["solution_quality"]["score"]
+    s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5
+  } else if question_type == "background_experience" {
+    let s1 = layer2_scores["experience_relevance"]["score"]
+    let s2 = layer2_scores["evidence_of_responsibility"]["score"]
+    s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5
+  } else if question_type == "motivation_self_description" {
+    let s1 = layer2_scores["role_alignment"]["score"]
+    s1 >= 0 && s1 <= 5
+  } else if question_type == "other" {
+    let n = len(keys(layer2_scores))
+    if n == 1 {
+      let s1 = values(layer2_scores)[0]["score"]
+      s1 >= 0 && s1 <= 5
+    } else if n == 2 {
+      let s1 = values(layer2_scores)[0]["score"]
+      let s2 = values(layer2_scores)[1]["score"]
+      s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5
+    } else if n == 3 {
+      let s1 = values(layer2_scores)[0]["score"]
+      let s2 = values(layer2_scores)[1]["score"]
+      let s3 = values(layer2_scores)[2]["score"]
+      s1 >= 0 && s1 <= 5 && s2 >= 0 && s2 <= 5 && s3 >= 0 && s3 <= 5
+    } else {
+      false
+    }
+  } else {
+    false
+  }
+}
+
+def P4v2_CheckJustificationsNonEmpty(
+  layer2_scores: Map<String, Any>,
+  question_type: String
+) {
+  if question_type == "behavioral" {
+    let j1 = layer2_scores["behavioral_evidence"]["justification"]
+    let j2 = layer2_scores["action_effectiveness"]["justification"]
+    let j3 = layer2_scores["outcome_effectiveness"]["justification"]
+    len(j1) >= 20 && len(j2) >= 20 && len(j3) >= 20
+  } else if question_type == "situational" {
+    let j1 = layer2_scores["decision_quality"]["justification"]
+    let j2 = layer2_scores["rationale_quality"]["justification"]
+    len(j1) >= 20 && len(j2) >= 20
+  } else if question_type == "technical_job_knowledge" {
+    let j1 = layer2_scores["technical_accuracy"]["justification"]
+    let j2 = layer2_scores["applied_understanding"]["justification"]
+    len(j1) >= 20 && len(j2) >= 20
+  } else if question_type == "analytical_problem_solving" {
+    let j1 = layer2_scores["analytical_reasoning_quality"]["justification"]
+    let j2 = layer2_scores["solution_quality"]["justification"]
+    len(j1) >= 20 && len(j2) >= 20
+  } else if question_type == "background_experience" {
+    let j1 = layer2_scores["experience_relevance"]["justification"]
+    let j2 = layer2_scores["evidence_of_responsibility"]["justification"]
+    len(j1) >= 20 && len(j2) >= 20
+  } else if question_type == "motivation_self_description" {
+    let j1 = layer2_scores["role_alignment"]["justification"]
+    len(j1) >= 20
+  } else if question_type == "other" {
+    let n = len(keys(layer2_scores))
+    if n == 1 {
+      let j1 = values(layer2_scores)[0]["justification"]
+      len(j1) >= 20
+    } else if n == 2 {
+      let j1 = values(layer2_scores)[0]["justification"]
+      let j2 = values(layer2_scores)[1]["justification"]
+      len(j1) >= 20 && len(j2) >= 20
+    } else if n == 3 {
+      let j1 = values(layer2_scores)[0]["justification"]
+      let j2 = values(layer2_scores)[1]["justification"]
+      let j3 = values(layer2_scores)[2]["justification"]
+      len(j1) >= 20 && len(j2) >= 20 && len(j3) >= 20
+    } else {
+      false
+    }
+  } else {
+    false
+  }
+}
+
+def P4v2_CheckDimensionKeysValid(
+  layer2_scores: Map<String, Any>,
+  question_type: String
+) {
+  let n = len(keys(layer2_scores))
+  if question_type == "behavioral" {
+    n == 3
+  } else if question_type == "situational" {
+    n == 2
+  } else if question_type == "technical_job_knowledge" {
+    n == 2
+  } else if question_type == "analytical_problem_solving" {
+    n == 2
+  } else if question_type == "background_experience" {
+    n == 2
+  } else if question_type == "motivation_self_description" {
+    n == 1
+  } else if question_type == "other" {
+    n >= 1 && n <= 3
+  } else {
+    false
+  }
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type GroundednessResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P4v2_CheckJustificationGrounded(
+  ambiguities: String,
+  answer_text: String,
+  evidence: String,
+  evidence_gaps: String,
+  layer2_scores: Map<String, Any>
+) -> GroundednessResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the dimension justifications inside `layer2_scores` are GROUNDED in the candidate's answer or the extracted P2 evidence -- not hallucinated or invented.
+
+Candidate's answer:
+{answer_text}
+
+Extracted P2 evidence (may have empty arrays):
+evidence: {evidence}
+evidence_gaps: {evidence_gaps}
+ambiguities: {ambiguities}
+
+Dimension justifications to evaluate (JSON object: dimension_name -> {{score, justification}}):
+{layer2_scores}
+
+SCOPE (critical):
+ONLY evaluate whether each justification's claims can be traced to content in the candidate's answer OR the extracted evidence above.
+Do NOT evaluate whether the SCORE is right.
+Do NOT evaluate writing quality, tone, or whether the dimension is the right scope.
+Only: is each justification GROUNDED?
+
+IMPORTANT CONTEXT:
+This is speech-to-text from non-native English speakers. Transcripts contain garbled words. A justification that cites garbled content from the transcript is still GROUNDED.
+
+GROUNDED (score 1) examples:
+- Justification cites "VBM macros" -> answer mentions "VBM macros" -> GROUNDED
+- Justification says "no quantitative outcomes mentioned" -> evidence.outcomes empty -> GROUNDED
+- Justification says "the candidate states 'I broke down the objective'" -> matches answer text -> GROUNDED
+- Justification says "the transcript does not provide clear evidence of X" -> X is indeed absent -> GROUNDED
+
+NOT GROUNDED (score 0) examples:
+- Justification says "shows strong leadership" -> answer never mentions leadership -> HALLUCINATED
+- Justification claims "used SQL" -> answer/evidence mention no SQL -> FABRICATED
+- Justification says "the candidate expressed passion for the role" -> no such statement -> INVENTED
+
+Scoring rules:
+- Score 1 if ALL dimension justifications make claims traceable to the answer or evidence (or correctly note absences).
+- Score 0 if ANY justification makes claims not traceable to either source.
+
+In your reason, cite the specific dimension and the ungrounded claim, if any.
+"""
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type HedgedResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P4v2_CheckJustificationHedged(
+  layer2_scores: Map<String, Any>
+) -> HedgedResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the dimension justifications inside `layer2_scores` use evidence-based, tentative language rather than overclaiming traits, capabilities, or states of mind.
+
+Dimension justifications to evaluate (JSON object: dimension_name -> {{score, justification}}):
+{layer2_scores}
+
+SCOPE (critical):
+Only evaluate the TONE and LANGUAGE of the justifications.
+Do NOT evaluate whether the score is correct.
+Do NOT evaluate whether claims are grounded.
+Do NOT evaluate whether the dimension is the right scope.
+Only: is the language tentative and evidence-based, or overclaiming?
+
+ACCEPTABLE (score 1) phrasing:
+- "The response states..."
+- "The candidate describes..."
+- "The transcript does not provide clear evidence of..."
+- "This provides limited/moderate/strong response evidence because..."
+- "Ideas flow clearly from context to action" (descriptive, about response structure)
+- "The response is clearly organized" (describing the response, not the candidate)
+
+NOT ACCEPTABLE (score 0) phrasing:
+- "The candidate is clearly motivated..." (trait overclaim)
+- "This proves they are a strong leader..." (certainty overclaim)
+- "They definitely have strong communication skills..." (capability overclaim)
+- "Evidence of strong analytical ability..." (trait inference)
+- "The candidate obviously understands the role..." (certainty overclaim)
+- "Demonstrates exceptional leadership..." (trait overclaim without evidence)
+
+KEY RULE:
+The word "clearly" is ACCEPTABLE when describing HOW the response is structured or written ("flows clearly", "clearly organized"). It is NOT ACCEPTABLE when claiming a trait about the candidate ("the candidate is clearly confident").
+
+Same applies to other descriptive words -- evaluate based on whether the phrase attributes a trait/capability/state-of-mind to the candidate, or describes observable response structure.
+
+Scoring rules:
+- Score 1 if ALL dimension justifications use tentative, evidence-based language (cite response content, avoid trait overclaims).
+- Score 0 if ANY justification makes trait-level overclaims about the candidate.
+
+In your reason, cite the specific dimension and the overclaiming phrase, if any.
+"""
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type ScopeResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P4v2_CheckDimensionScope(
+  layer2_scores: Map<String, Any>,
+  question_type: String
+) -> ScopeResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether each dimension's justification stays on-scope for that dimension. The dimensions and their criteria depend on the question_type.
+
+Question type: {question_type}
+
+Dimension definitions for this question_type:
+{if question_type == "behavioral" {
+  "- behavioral_evidence: how clearly and specifically the candidate describes their actions and role in the situation (presence and specificity of past actions/role)\n- action_effectiveness: how appropriate and effective the candidate's actions are in addressing the situation (judgment of action choice; may also note when there is too little evidence to evaluate the action)\n- outcome_effectiveness: how relevant and impactful the outcomes are, based on the candidate's actions (results attributable to their actions; may also note when there is too little evidence to evaluate the outcome)"
+} else if question_type == "situational" {
+  "- decision_quality: how appropriate and feasible the proposed course of action is (the proposed action itself; may also note insufficient evidence to evaluate)\n- rationale_quality: how logically the candidate justifies their decisions, including consideration of trade-offs (the reasoning behind the action; may also note insufficient evidence to evaluate)"
+} else if question_type == "technical_job_knowledge" {
+  "- technical_accuracy: how accurate the candidate's information, concepts, or procedures are (factual correctness; may also note insufficient evidence)\n- applied_understanding: how effectively the candidate applies knowledge to realistic work contexts (translation of knowledge to practice; may also note insufficient evidence)"
+} else if question_type == "analytical_problem_solving" {
+  "- analytical_reasoning_quality: how logically consistent and well-prioritized the candidate's reasoning process is (process of analysis; may also note insufficient evidence)\n- solution_quality: how relevant and useful the candidate's conclusions or proposed solutions are (the conclusion/solution itself; may also note insufficient evidence)"
+} else if question_type == "background_experience" {
+  "- experience_relevance: how well the candidate's described experience aligns with the job (alignment of past role/scope to target role; may also note insufficient evidence)\n- evidence_of_responsibility: how clearly the candidate demonstrates ownership and responsibility for actions and outcomes (ownership scope; may also note insufficient evidence)"
+} else if question_type == "motivation_self_description" {
+  "- role_alignment: how well the candidate's stated motivations and preferences align with the demands of the role (specificity of motivation tied to role demands; may also note insufficient evidence)"
+} else {
+  "(Custom dimensions for 'other' question type. Each dimension is defined ad-hoc to the question intent. Evaluate whether each justification's argument aligns with what the dimension's NAME implies it should be checking, and does NOT drift into other dimensions present in the same response.)"
+}}
+
+Dimension justifications to evaluate (JSON object: dimension_name -> {{score, justification}}):
+{layer2_scores}
+
+SCOPE (critical):
+Only evaluate whether each justification STAYS IN ITS LANE.
+Do NOT evaluate correctness of the score, grounding in evidence, writing quality, or tone -- those are covered by other metrics.
+Only: is each justification using reasoning that belongs to its own dimension?
+
+WORDING vs LOGIC -- the key distinction:
+A word like "specific", "detail", "example", "clear", "effective", "specific examples" can appear in MULTIPLE dimensions and is NOT automatically a scope leak. Judge based on WHAT THE JUSTIFICATION IS ACTUALLY ARGUING, not on which words appear.
+
+EVALUABILITY clause (important):
+A justification that says "I can't fully judge X because the response lacks specific examples / lacks detail" stays ON-SCOPE for whatever dimension is being scored. Noting that there is too little evidence to evaluate one's own dimension is a legitimate evidentiary basis for that dimension -- it is NOT a leak to behavioral_evidence (or to any other dimension that owns the word "specificity"). Same applies across all dimensions.
+
+ON-SCOPE examples (vocabulary may overlap, argument fits the dimension):
+- behavioral_evidence: "the response states 'I broke down the objective and pulled data', specific actions are described" -> argues presence/specificity of actions -> ON-SCOPE
+- action_effectiveness: "the chosen approach (using Power BI to integrate data) is appropriate to address the lack of baseline" -> judges the choice of action -> ON-SCOPE
+- action_effectiveness: "the candidate describes generally appropriate actions, but the effectiveness is not fully evidenced due to the absence of specific examples" -> arguing evaluability of effectiveness given limited evidence -> ON-SCOPE (NOT a leak to behavioral_evidence; the judgment is still about action quality)
+- outcome_effectiveness: "no quantitative impact mentioned; only that the chart was adopted" -> argues thinness of impact -> ON-SCOPE
+- outcome_effectiveness: "the impact is unclear because the response does not detail any specific results" -> arguing evaluability of outcome -> ON-SCOPE
+- decision_quality: "the proposed plan to escalate to senior leaders is feasible" -> judges feasibility of action -> ON-SCOPE
+- rationale_quality: "the candidate weighs trade-offs between speed and accuracy" -> judges reasoning -> ON-SCOPE
+- role_alignment: "the candidate cites interest in production line work matching the program's technical focus" -> argues alignment to role demands -> ON-SCOPE
+
+OFF-SCOPE examples (the argument actually belongs to a different dimension):
+- behavioral_evidence: "the outcome was strong with company-wide adoption" -> arguing OUTCOME (= outcome_effectiveness's lane) -> OFF-SCOPE
+- action_effectiveness: "the candidate clearly describes specific actions step-by-step" -> arguing PRESENCE/specificity of description (= behavioral_evidence's lane) -> OFF-SCOPE
+- decision_quality: "the rationale is well-reasoned" -> arguing RATIONALE (= rationale_quality's lane) -> OFF-SCOPE
+- rationale_quality: "the proposed action is appropriate" -> arguing the ACTION ITSELF (= decision_quality's lane) -> OFF-SCOPE
+- role_alignment: "the candidate provides specific examples" -> arguing SPECIFICITY/EVIDENCE (not motivation alignment) -> OFF-SCOPE
+
+KEY HEURISTIC:
+- Did the justification critique the RIGHT THING for its dimension? -> if yes, on-scope, even if it borrows shared vocabulary.
+- A shared word like "specific" or "clear" is ON-SCOPE if the noun it modifies fits the dimension OR if the justification is using it to note that there is too little evidence to evaluate this dimension.
+- When in doubt, give the BENEFIT OF THE DOUBT -- only flag CLEAR cross-dimension reasoning leaks (the justification is actually arguing about a different dimension's criterion, not just borrowing a word).
+
+Scoring rules:
+- Score 1 if ALL justifications argue concerns that fit their own dimension (vocabulary overlap is OK; evaluability comments are OK).
+- Score 0 ONLY if a justification's actual argument belongs to a different dimension (e.g., judges outcome quality while scoring behavioral_evidence; judges action description while scoring action_effectiveness).
+
+In your reason, cite the offending dimension AND name which dimension it actually belongs to, if any. If you're scoring 0 due to vocabulary alone OR due to an evaluability comment, reconsider and score 1 instead.
+"""
+}
+
+// Complete pipeline: generate outputs and evaluate metrics
+def RunComplete() {
+  RunBatch()
+  |> map_row("p4v2_checkscoresinrange", P4v2_CheckScoresInRange($layer2_scores, $question_type))
+  |> map_row("p4v2_checkjustificationsnonempty", P4v2_CheckJustificationsNonEmpty($layer2_scores, $question_type))
+  |> map_row("p4v2_checkdimensionkeysvalid", P4v2_CheckDimensionKeysValid($layer2_scores, $question_type))
+  |> map_row("p4v2_checkjustificationgrounded", P4v2_CheckJustificationGrounded($ambiguities, $answer_text, $evidence, $evidence_gaps, $layer2_scores))
+  |> map_row("p4v2_checkjustificationhedged", P4v2_CheckJustificationHedged($layer2_scores))
+  |> map_row("p4v2_checkdimensionscope", P4v2_CheckDimensionScope($layer2_scores, $question_type))
+}

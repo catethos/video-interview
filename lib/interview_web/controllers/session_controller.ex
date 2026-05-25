@@ -155,6 +155,8 @@ defmodule InterviewWeb.SessionController do
       template_version_id: version.id,
       candidate_email: candidate_email,
       external_id: params["external_id"],
+      job_role: params["job_role"],
+      job_description: params["job_description"],
       state: "in_progress"
     })
     |> Repo.insert()

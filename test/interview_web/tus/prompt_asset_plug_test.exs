@@ -54,7 +54,12 @@ defmodule InterviewWeb.Tus.PromptAssetPlugTest do
       conn =
         conn
         |> put_req_header("tus-resumable", @tus_version)
-        |> Phoenix.ConnTest.dispatch(InterviewWeb.Endpoint, :options, "/uploads/prompt_assets", nil)
+        |> Phoenix.ConnTest.dispatch(
+          InterviewWeb.Endpoint,
+          :options,
+          "/uploads/prompt_assets",
+          nil
+        )
 
       assert conn.status == 204
       assert get_resp_header(conn, "tus-resumable") == [@tus_version]

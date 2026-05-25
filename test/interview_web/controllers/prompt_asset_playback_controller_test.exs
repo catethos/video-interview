@@ -49,7 +49,9 @@ defmodule InterviewWeb.PromptAssetPlaybackControllerTest do
 
   test "returns 404 when the asset is not referenced by this session",
        %{conn: conn, asset: a} do
-    other_session = Fixtures.session!(a.tenant_id, Fixtures.version!(Fixtures.template!(a.tenant_id).id).id)
+    other_session =
+      Fixtures.session!(a.tenant_id, Fixtures.version!(Fixtures.template!(a.tenant_id).id).id)
+
     res = get(conn, ~p"/capture/#{other_session.id}/prompt_assets/#{a.id}")
     assert res.status == 404
   end

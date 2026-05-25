@@ -65,7 +65,10 @@ defmodule Interview.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:oban, "~> 2.18"},
-      {:yaml_elixir, "~> 2.11"}
+      {:yaml_elixir, "~> 2.11"},
+      # Scoring pipeline runtime. Ships a precompiled Rust NIF via
+      # rustler_precompiled, so no local Rust toolchain is needed.
+      {:lattice, "0.2.2"}
     ]
   end
 

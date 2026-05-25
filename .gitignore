@@ -51,3 +51,6 @@ npm-debug.log
 .elixir_ls/
 .lexical/
 
+# Personal prep notes — not part of the repo.
+DEMO_BRIEF.md
+

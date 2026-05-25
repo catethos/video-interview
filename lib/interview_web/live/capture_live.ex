@@ -8,31 +8,84 @@ defmodule InterviewWeb.CaptureLive do
   alias Interview.Capture.Session
 
   # Per-question phase machine (within the candidate flow):
-  #   :awaiting_auth — page shown before bootstrap consumed; hook posts `ready`.
-  #   :prep      — prompt visible, optional think-time countdown active.
-  #   :recording — MediaRecorder running.
-  #   :draining  — MediaRecorder stopped; uploader still flushing IDB → tus.
-  #   :answered  — capture_complete acked; question is done for this attempt.
-  #   :review    — past the last question; review + submit screen.
-  #   :submitted — submit accepted by server; session.state = submitted/ready.
-  #   :fenced    — another tab/instance took over the writer.
+  #   :awaiting_auth     — page shown before bootstrap consumed; hook posts `ready`.
+  #   :intro             — welcome screen + AI-evaluation disclosure + "I'm ready" gate.
+  #   :permission_denied — candidate denied camera/mic permission; offers retry.
+  #   :prep              — prompt visible, optional think-time countdown active.
+  #   :recording         — MediaRecorder running.
+  #   :draining          — MediaRecorder stopped; uploader still flushing IDB → tus.
+  #   :answered          — capture_complete acked; question is done for this attempt.
+  #   :review            — past the last question; review + submit screen.
+  #   :submitted         — submit accepted by server; session.state = submitted/ready.
+  #   :fenced            — another tab/instance took over the writer.
 
   @impl true
   def mount(%{"session_id" => session_id} = params, _session, socket) do
     socket = assign(socket, :session_id, session_id)
 
-    case authenticate(params, session_id, connected?(socket)) do
+    # LiveView mounts twice: HTTP "disconnected" → renders initial HTML,
+    # then WebSocket "connected" → re-runs mount, switches to live updates.
+    # The disconnected mount must be cheap and read-only — anything slow
+    # delays first paint; any DB write commits even if the browser closes.
+    # So on disconnected, only do the cheap `authenticate` peek (token
+    # validity check) and render either an early-rejection screen OR a
+    # minimal "Connecting…" shell. The full DB work (session questions,
+    # template version, prompt asset kinds, upload bearer mint, audit
+    # log) happens only on the connected mount.
+    if connected?(socket) do
+      mount_connected(socket, session_id, params)
+    else
+      mount_disconnected(socket, session_id, params)
+    end
+  end
+
+  defp mount_connected(socket, session_id, params) do
+    case authenticate(params, session_id, true) do
       {:ok, %Session{} = session} ->
-        {:ok, mount_authenticated(socket, session, connected?(socket))}
+        {:ok, mount_authenticated(socket, session, true)}
 
       :awaiting_auth ->
         {:ok, mount_awaiting_auth(socket, session_id)}
 
       :not_found ->
-        # Render in-place rather than push_navigate to "/": the home page is
-        # on the :browser pipeline and ships X-Frame-Options: DENY, so an
-        # iframe redirected there is blocked. Staying on :embed keeps the
-        # frame-ancestors CSP that lets the parent display this response.
+        {:ok, assign(socket, :not_found, true) |> assign(:rejected, false)}
+
+      {:rejected, reason} ->
+        {:ok,
+         socket
+         |> assign(:not_found, false)
+         |> assign(:rejected, true)
+         |> assign(:rejected_reason, reason)}
+    end
+  end
+
+  defp mount_disconnected(socket, session_id, params) do
+    # Peek (read-only, single small query) to catch the obvious failure
+    # modes — token missing / not_found / rejected — at first-paint time
+    # so the candidate doesn't see a "Connecting…" flash followed by
+    # "Session unavailable". The peek does NOT do the expensive setup
+    # (session_questions, asset kinds, bearer); that waits for connect.
+    case authenticate(params, session_id, false) do
+      {:ok, %Session{}} ->
+        # Cheap shell: the connected mount will re-render with the full
+        # authenticated state in ~50-150ms. Skipping the DB-heavy setup
+        # avoids the Iron Law violation (no INSERTs on disconnected mount,
+        # no four-round-trip latency before first paint).
+        {:ok,
+         socket
+         |> assign(:not_found, false)
+         |> assign(:rejected, false)
+         |> assign(:phase, :connecting)
+         |> assign(:session_id, session_id)}
+
+      :awaiting_auth ->
+        {:ok, mount_awaiting_auth(socket, session_id)}
+
+      :not_found ->
+        # Render in-place rather than push_navigate to "/": the home page
+        # is on the :browser pipeline and ships X-Frame-Options: DENY, so
+        # an iframe redirected there is blocked. Staying on :embed keeps
+        # the frame-ancestors CSP that lets the parent display this response.
         {:ok, assign(socket, :not_found, true) |> assign(:rejected, false)}
 
       {:rejected, reason} ->
@@ -126,6 +179,11 @@ defmodule InterviewWeb.CaptureLive do
       |> assign(:capture_complete_acked, false)
       |> assign(:bitrate_step, 0)
       |> assign(:think_time_remaining, nil)
+      # Monotonic id bumped on retake / question advance so the
+      # ThinkTimeCountdown hook (whose root span has phx-update="ignore")
+      # remounts with a fresh data-think-seconds read instead of
+      # reusing the previous attempt's already-expired timer.
+      |> assign(:think_time_key, 1)
       |> assign(:last_recording_duration_ms, nil)
       |> assign(:too_short, false)
       |> assign(:submit_error, nil)
@@ -163,7 +221,21 @@ defmodule InterviewWeb.CaptureLive do
   defp initial_phase([], _session), do: :review
   defp initial_phase(_questions, %Session{state: "submitted"}), do: :submitted
   defp initial_phase(_questions, %Session{state: "ready"}), do: :submitted
-  defp initial_phase(_questions, _session), do: :prep
+
+  defp initial_phase(_questions, %Session{} = session) do
+    # Sessions are inserted with state="in_progress" at /api/sessions
+    # time (see session_controller.ex), so we can't use that field to
+    # distinguish a fresh landing from a mid-interview reload. Use the
+    # presence of recorded responses instead: if the candidate has any
+    # answers stored, they've been past the intro gate already and we
+    # send them straight to the current question. Otherwise show the
+    # intro/disclosure screen.
+    if Capture.any_responses?(session.id) do
+      :prep
+    else
+      :intro
+    end
+  end
 
   # Map of `prompt_asset_id => "image" | "pdf" | "video" | …`. Used by
   # `render_attachment` to pick the right element (img / iframe / link).
@@ -260,10 +332,76 @@ defmodule InterviewWeb.CaptureLive do
   end
 
   def handle_event("permission", %{"state" => state} = payload, socket) do
+    # A "denied" permission while we're still in the intro/prep gating
+    # phases routes the candidate to a dedicated screen with browser-
+    # specific re-enable instructions. Once they're recording or past,
+    # denial is a more disruptive event (existing flow handles it via
+    # recorder_error / fence semantics) and we don't override phase
+    # here so we don't yank context out from under an active capture.
+    socket =
+      socket
+      |> assign(:permission_state, state)
+      |> assign(:last_error, payload["error"])
+
+    socket =
+      if state == "denied" and socket.assigns.phase in [:intro, :prep] do
+        assign(socket, :phase, :permission_denied)
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  # Tab/window focus telemetry from the JS hook. Recorded only when
+  # the candidate is actively recording — outside that window the
+  # signal isn't useful (a tab-switch during think-time is just normal
+  # multitasking). We never block on persistence: insert is best-effort
+  # so a transient DB hiccup doesn't break the take.
+  def handle_event("focus_lost", %{"at" => iso8601}, socket) do
+    {:noreply, record_focus_event_if_recording(socket, "lost", iso8601)}
+  end
+
+  def handle_event("focus_regained", %{"at" => iso8601}, socket) do
+    {:noreply, record_focus_event_if_recording(socket, "regained", iso8601)}
+  end
+
+  def handle_event("intro_ready", _params, socket) do
+    # Candidate accepted the disclosure on the intro screen and is
+    # ready to begin. Transition into the standard per-question flow.
+    # The recorder hook mounts here for the first time, so we have to
+    # re-emit the `set_question` and `auth_acked` events that fired
+    # during mount_authenticated — those were pushed before the hook
+    # existed in the DOM and have been lost. LiveView delivers events
+    # pushed inside this handler AFTER the diff lands and the hook
+    # has mounted, so the re-pushes reach the new hook reliably.
+    socket =
+      socket
+      |> assign(:phase, :prep)
+      |> push_set_question()
+
+    socket =
+      if bearer = socket.assigns[:upload_bearer] do
+        push_event(socket, "auth_acked", %{uploadBearer: bearer})
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("permission_denied_retry", _params, socket) do
+    # Drop back into :prep so the standard "Open camera" button is
+    # available; clearing :last_error keeps the previous denial copy
+    # from sticking around if the next request succeeds. We do NOT
+    # auto-fire the permission request here — the candidate clicks
+    # the camera button themselves so the gesture is browser-trusted
+    # (some browsers require a user gesture per request).
     {:noreply,
      socket
-     |> assign(:permission_state, state)
-     |> assign(:last_error, payload["error"])}
+     |> assign(:phase, :prep)
+     |> assign(:permission_state, "idle")
+     |> assign(:last_error, nil)}
   end
 
   def handle_event(
@@ -460,6 +598,7 @@ defmodule InterviewWeb.CaptureLive do
            |> assign(:bytes_uploaded, 0)
            |> assign(:response_id, nil)
            |> assign(:capture_instance_id, nil)
+           |> update(:think_time_key, &(&1 + 1))
            |> push_set_question(used + 1)}
         end
     end
@@ -603,6 +742,21 @@ defmodule InterviewWeb.CaptureLive do
 
   defp current_question(_), do: nil
 
+  # Best-effort persistence of a tab-focus event from the JS hook.
+  # Recorded only when the candidate is actively recording — outside
+  # that window the signal isn't meaningful (think-time tab-switches
+  # are just normal multitasking).
+  defp record_focus_event_if_recording(socket, kind, iso8601) do
+    with :recording <- socket.assigns.phase,
+         rid when is_binary(rid) <- socket.assigns[:response_id],
+         {:ok, at, _offset} <- DateTime.from_iso8601(iso8601) do
+      _ = Capture.record_focus_event(rid, kind, at)
+      socket
+    else
+      _ -> socket
+    end
+  end
+
   defp below_min?(_q, nil), do: false
 
   defp below_min?(%{min_answer_seconds: nil}, _ms), do: false
@@ -719,6 +873,26 @@ defmodule InterviewWeb.CaptureLive do
     """
   end
 
+  def render(%{phase: :connecting} = assigns) do
+    # Disconnected (initial HTTP) mount: render a minimal "Connecting…"
+    # shell with no recorder hook, no DB-backed UI. The connected
+    # mount fires within ~100ms and re-renders the real authenticated
+    # state. Without this branch we'd be triggering ensure_session_questions
+    # (an INSERT!) on every page hit before the candidate has even
+    # established their WebSocket — see Iron Law fix in the candidate-
+    # ux-overhaul history.
+    ~H"""
+    <div class="mx-auto max-w-3xl py-12 px-6 space-y-3">
+      <h1 class="font-display italic text-[1.6rem] text-base-content/85">
+        Connecting…
+      </h1>
+      <p class="text-sm text-base-content/55 max-w-[40ch]">
+        Establishing a secure connection to your interview.
+      </p>
+    </div>
+    """
+  end
+
   def render(assigns) do
     assigns =
       assigns
@@ -727,10 +901,30 @@ defmodule InterviewWeb.CaptureLive do
 
     ~H"""
     <div class="mx-auto max-w-4xl px-6 sm:px-10 py-12 sm:py-16 space-y-14">
+      <%!--
+        Shared aria-live announcement target for time-sensitive
+        countdowns (think-time, idle-to-record, recording-time). Hidden
+        visually; updated by JS hooks only at milestones (every 10s or
+        the final 5s) so screen-reader users get useful cues without
+        per-second noise.
+      --%>
+      <span
+        id="countdown-announce"
+        data-role="countdown-announce"
+        class="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+      </span>
+
       <header>
         <div class="flex flex-wrap items-baseline justify-between gap-3">
           <p class="zen-eyebrow">
             <%= cond do %>
+              <% @phase == :intro -> %>
+                § — Welcome
+              <% @phase == :permission_denied -> %>
+                § — Camera access
               <% @phase == :review -> %>
                 § — Review
               <% @phase == :submitted -> %>
@@ -753,6 +947,10 @@ defmodule InterviewWeb.CaptureLive do
       </header>
 
       <%= cond do %>
+        <% @phase == :intro -> %>
+          {render_intro(assigns)}
+        <% @phase == :permission_denied -> %>
+          {render_permission_denied(assigns)}
         <% @phase == :review -> %>
           {render_review(assigns)}
         <% @phase == :submitted -> %>
@@ -778,7 +976,7 @@ defmodule InterviewWeb.CaptureLive do
           <p class="text-sm text-base-content/60">No questions in this template.</p>
       <% end %>
 
-      <%= if @phase not in [:review, :submitted, :fenced] do %>
+      <%= if @phase not in [:intro, :permission_denied, :review, :submitted, :fenced] do %>
         <details class="opacity-50 hover:opacity-100 transition-opacity">
           <summary class="zen-eyebrow text-[10px] cursor-pointer select-none list-none">
             § — Debug
@@ -855,7 +1053,24 @@ defmodule InterviewWeb.CaptureLive do
                 preload="auto"
                 class="w-full max-w-xl rounded-sm bg-black/95"
                 src={~p"/capture/#{@session_id}/prompt_assets/#{@current_question.prompt_asset_id}"}
+                crossorigin="anonymous"
               >
+                <%!--
+                  Auto-generated WebVTT track via Workers.PromptAssetCaption.
+                  The endpoint 404s when the caption job hasn't finished —
+                  modern browsers handle that gracefully (no captions
+                  shown, no error displayed). srclang="en" matches the
+                  hardcoded Whisper language="en" in the adapter.
+                --%>
+                <track
+                  kind="captions"
+                  src={
+                    ~p"/capture/#{@session_id}/prompt_assets/#{@current_question.prompt_asset_id}/captions.vtt"
+                  }
+                  srclang="en"
+                  label="English"
+                  default
+                />
               </video>
             </div>
           </div>
@@ -892,12 +1107,16 @@ defmodule InterviewWeb.CaptureLive do
               >
                 ▸
               </span>
-              <span>{if @attachment_expanded, do: "Hide the attachment", else: "Re-view the attachment"}</span>
+              <span>
+                {if @attachment_expanded, do: "Hide the attachment", else: "Re-view the attachment"}
+              </span>
             </button>
           <% end %>
           <div class="section-shutter">
             <div>
-              {render_attachment(assign(assigns, :attachment_id, @current_question.attachment_asset_id))}
+              {render_attachment(
+                assign(assigns, :attachment_id, @current_question.attachment_asset_id)
+              )}
             </div>
           </div>
         </div>
@@ -918,6 +1137,19 @@ defmodule InterviewWeb.CaptureLive do
         <% end %>
         <span>{if @current_question.required, do: "Required", else: "Optional"}</span>
       </p>
+
+      <%= if @phase == :prep and @current_question.think_time_seconds && @current_question.think_time_seconds > 0 do %>
+        <p class="font-display italic text-[14.5px] leading-[1.6] text-base-content/70 max-w-[44ch] think-time-phrase">
+          <span
+            id={"think-time-#{@current_index}-#{@current_question.id}-#{@think_time_key}"}
+            phx-hook="ThinkTimeCountdown"
+            phx-update="ignore"
+            data-think-seconds={@current_question.think_time_seconds}
+          >
+            Recording begins in {@current_question.think_time_seconds} seconds.
+          </span>
+        </p>
+      <% end %>
     </section>
     """
   end
@@ -1045,9 +1277,157 @@ defmodule InterviewWeb.CaptureLive do
         Picked up <em class="italic font-light text-primary">elsewhere</em>.
       </h2>
       <p class="text-[15px] leading-[1.65] text-base-content/75 max-w-[44ch]">
-        Another tab or window took over this interview.
-        Continue there, or reload to resume here.
+        Another tab or window took over this interview, or your connection
+        blipped at a bad moment. Reload this page to resume.
       </p>
+      <div class="pt-2">
+        <button
+          type="button"
+          onclick="window.location.reload()"
+          class="zen-link text-base-content text-[15px]"
+        >
+          <span class="zen-arrow" aria-hidden="true">↺</span>
+          <span>Reload and continue</span>
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  defp render_intro(assigns) do
+    ~H"""
+    <div class="max-w-xl mx-auto space-y-10">
+      <section class="space-y-5">
+        <h2 class="font-display text-[clamp(1.8rem,4.5vw,2.6rem)] leading-[1.15] tracking-[-0.018em] font-light">
+          A few <em class="italic font-light text-primary">moments</em> before we begin.
+        </h2>
+        <p class="text-[15px] leading-[1.65] text-base-content/80 max-w-[44ch]">
+          You'll be asked a small number of questions, one at a time. After each
+          prompt you'll have a brief think-time, then you record your answer
+          straight into the browser.
+        </p>
+      </section>
+
+      <ul class="space-y-2 text-[14.5px] leading-[1.55] text-base-content/75 max-w-[44ch]">
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">01</span>
+          <span>Make sure you're somewhere quiet with a steady connection.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">02</span>
+          <span>Allow camera and microphone access when prompted.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="zen-eyebrow text-[10px] mt-1 opacity-55">03</span>
+          <span>Once you start recording, give the answer in one take.</span>
+        </li>
+      </ul>
+
+      <p class="text-[12.5px] italic leading-[1.6] text-base-content/55 max-w-[44ch] border-l-2 border-base-content/15 pl-4">
+        Your spoken answer will be transcribed and scored by AI against a
+        structured rubric. A human recruiter reviews the score and the
+        recording before any hiring decision.
+      </p>
+
+      <%!--
+        Recorder hook mounts here during :intro so the candidate can
+        grant camera + mic permission BEFORE the "I'm ready" CTA
+        appears. We reuse render_recorder unchanged — the same hook
+        instance stays alive across the :intro → :prep transition
+        (same #recorder id), so the granted MediaStream survives.
+      --%>
+      <div
+        class="space-y-7 min-w-0"
+        data-camera-state={if @permission_state == "granted", do: "on", else: "off"}
+        data-phase={@phase}
+      >
+        {render_recorder(assigns)}
+      </div>
+
+      {render_intro_cta(assigns)}
+    </div>
+    """
+  end
+
+  defp render_intro_cta(assigns) do
+    ~H"""
+    <div class="pt-2">
+      <%= cond do %>
+        <% @permission_state == "granted" -> %>
+          <button
+            type="button"
+            phx-click="intro_ready"
+            class="zen-link text-base-content text-[15px]"
+          >
+            <span class="zen-arrow" aria-hidden="true">→</span>
+            <span>I'm ready</span>
+          </button>
+        <% @permission_state == "requesting" -> %>
+          <p class="text-[13.5px] italic leading-[1.55] text-base-content/65">
+            Waiting for your browser to confirm camera and microphone access…
+          </p>
+        <% true -> %>
+          <p class="text-[13.5px] leading-[1.55] text-base-content/65 max-w-[44ch]">
+            Allow camera and microphone above. The <em class="italic">"I'm ready"</em>
+            button will appear here once
+            access is granted.
+          </p>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp render_permission_denied(assigns) do
+    ~H"""
+    <section class="max-w-xl mx-auto space-y-8 py-4">
+      <div class="space-y-5">
+        <p class="zen-eyebrow opacity-55 text-warning">§ — Camera access</p>
+        <h2 class="font-display text-[clamp(1.8rem,4.5vw,2.6rem)] leading-[1.15] tracking-[-0.018em] font-light">
+          We need <em class="italic font-light text-primary">access</em>
+          to your camera and microphone.
+        </h2>
+        <p class="text-[15px] leading-[1.65] text-base-content/80 max-w-[46ch]">
+          Your browser blocked the request. The interview is recorded by
+          your own device — without camera and microphone permission, we
+          can't capture an answer. Re-enable access in your browser, then
+          try again.
+        </p>
+      </div>
+
+      <details class="text-[13.5px] leading-[1.6] text-base-content/70 max-w-[46ch]">
+        <summary class="cursor-pointer select-none zen-link text-base-content/75 hover:text-base-content inline-flex items-baseline gap-2">
+          <span class="text-[11px]" aria-hidden="true">▸</span>
+          <span>How to re-enable access</span>
+        </summary>
+        <div class="mt-4 space-y-3 pl-4 border-l border-base-content/10">
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Chrome / Edge —</span>
+            click the camera icon at the left edge of the address bar,
+            choose <em class="italic">Allow</em>, then reload.
+          </p>
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Safari —</span>
+            open <em class="italic">Safari → Settings for This Website…</em>
+            and set Camera + Microphone to <em class="italic">Allow</em>.
+          </p>
+          <p>
+            <span class="zen-eyebrow text-[10px] opacity-55">Firefox —</span>
+            click the camera icon at the left edge of the address bar and
+            remove the blocked permission, then try again.
+          </p>
+        </div>
+      </details>
+
+      <div class="pt-2">
+        <button
+          type="button"
+          phx-click="permission_denied_retry"
+          class="zen-link text-base-content text-[15px]"
+        >
+          <span class="zen-arrow" aria-hidden="true">↺</span>
+          <span>I've enabled access — try again</span>
+        </button>
+      </div>
     </section>
     """
   end
@@ -1062,7 +1442,7 @@ defmodule InterviewWeb.CaptureLive do
       class="space-y-5 min-w-0"
     >
       <div class="preview-shutter">
-        <div>
+        <div class="relative">
           <video
             data-role="preview"
             autoplay
@@ -1071,6 +1451,18 @@ defmodule InterviewWeb.CaptureLive do
             class="w-full aspect-video rounded-sm bg-black/95"
           >
           </video>
+          <span
+            data-role="recording-countdown"
+            class="absolute bottom-3 right-3 font-display italic text-base text-white/85 tracking-tight recording-countdown"
+            aria-hidden="true"
+          >
+          </span>
+          <span
+            data-role="cinematic-countdown"
+            class="absolute inset-0 flex items-center justify-center font-display italic text-white/55 cinematic-countdown pointer-events-none"
+            aria-hidden="true"
+          >
+          </span>
         </div>
       </div>
 
@@ -1087,9 +1479,15 @@ defmodule InterviewWeb.CaptureLive do
           <span class="zen-arrow" aria-hidden="true">■</span>
           <span>Stop</span>
         </button>
-        <button data-action="release" class="zen-link text-base-content/55 hover:text-base-content ml-auto">
-          <span>Release camera</span>
-        </button>
+        <span
+          data-role="mic-level"
+          class="mic-level ml-auto"
+          aria-hidden="true"
+          title="Microphone input level"
+        >
+          <span class="mic-level-bar"></span>
+          <span class="mic-level-label">Mic</span>
+        </span>
       </div>
     </section>
     """
@@ -1102,69 +1500,107 @@ defmodule InterviewWeb.CaptureLive do
 
       <dl class="grid grid-cols-2 gap-x-5 gap-y-3 text-[11px]">
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Session</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@session_id}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Session
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@session_id}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Phase</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Phase
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@phase}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Session state</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Session state
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@session_state}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Permission</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Permission
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@permission_state}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Recorder</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Recorder
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@recorder_state}</dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">MIME</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            MIME
+          </dt>
           <dd class="font-mono text-base-content/85 break-all">{@mime_type || "—"}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Buffered</dt>
-          <dd class="font-mono text-base-content/85 tabular-nums">{format_bytes(@bytes_buffered_locally)}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Buffered
+          </dt>
+          <dd class="font-mono text-base-content/85 tabular-nums">
+            {format_bytes(@bytes_buffered_locally)}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Uploaded</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Uploaded
+          </dt>
           <dd class="font-mono text-base-content/85 tabular-nums">{format_bytes(@bytes_uploaded)}</dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Complete</dt>
-          <dd class="font-mono text-base-content/85">{if @capture_complete_acked, do: "yes", else: "no"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Complete
+          </dt>
+          <dd class="font-mono text-base-content/85">
+            {if @capture_complete_acked, do: "yes", else: "no"}
+          </dd>
         </div>
 
         <div class="space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Bitrate step</dt>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Bitrate step
+          </dt>
           <dd class="font-mono text-base-content/85 tabular-nums">{@bitrate_step}</dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Capture instance</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@capture_instance_id || "—"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Capture instance
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@capture_instance_id || "—"}
+          </dd>
         </div>
 
         <div class="col-span-2 space-y-0">
-          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Response id</dt>
-          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">{@response_id || "—"}</dd>
+          <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+            Response id
+          </dt>
+          <dd class="font-mono text-[10.5px] text-base-content/80 break-all leading-snug">
+            {@response_id || "—"}
+          </dd>
         </div>
 
         <%= if @last_recording_duration_ms do %>
           <div class="col-span-2 space-y-0">
-            <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">Last duration</dt>
-            <dd class="font-mono text-base-content/85 tabular-nums">{@last_recording_duration_ms} ms</dd>
+            <dt class="font-mono uppercase tracking-[0.18em] text-[8.5px] text-base-content/45">
+              Last duration
+            </dt>
+            <dd class="font-mono text-base-content/85 tabular-nums">
+              {@last_recording_duration_ms} ms
+            </dd>
           </div>
         <% end %>
 

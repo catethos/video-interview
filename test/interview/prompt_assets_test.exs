@@ -181,6 +181,7 @@ defmodule Interview.PromptAssetsTest do
 
       # Backdate the stale asset
       ago = NaiveDateTime.utc_now() |> NaiveDateTime.add(-3_600, :second)
+
       Repo.update_all(
         from(a in PromptAsset, where: a.id == ^stale.id),
         set: [inserted_at: ago]
