@@ -54,6 +54,10 @@ config :interview, Interview.Transcripts,
   enabled: true,
   adapter: Interview.TranscriptsStub
 
+# Scoring pipeline — process-local stub so orchestration is tested without
+# spending an LLM call. Production uses PipelineRunner.Lattice (the default).
+config :interview, Interview.Scoring.PipelineRunner, adapter: Interview.Scoring.PipelineRunnerStub
+
 # Webhook URL policy — tests routinely use `https://example.test/hook`
 # (passes shape) and the stub bypasses the destination check entirely.
 # URLPolicy tests that *want* to exercise the strict path pass explicit
