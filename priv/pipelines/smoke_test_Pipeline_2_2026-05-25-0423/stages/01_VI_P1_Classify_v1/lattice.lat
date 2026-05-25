@@ -1,0 +1,249 @@
+// ============================================
+// LATTICE PROMPT SESSION
+// Generated: 2026-05-20T09:44:08.739864Z
+// ============================================
+
+llm_config dynamic_config {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "google/gemini-3.1-flash-lite"
+  api_key_env: "OPENROUTER_API_KEY"
+  temperature: 0.0
+  max_tokens: 16000
+}
+
+enum QuestionType {
+  behavioral,
+  situational,
+  technical_job_knowledge,
+  analytical_problem_solving,
+  background_experience,
+  motivation_self_description,
+  other
+}
+
+type ClassificationOutput {
+  classifications: [QuestionClassification] @"One classification entry per interview question"
+}
+
+type QuestionClassification {
+  question_number: Int @"The sequence number of the question in the interview (1 for first, 2 for second, etc.)",
+  question_text: String @"Exact wording of the question from the transcript",
+  question_type: QuestionType @"One of the 7 allowed question types",
+  question_type_rationale: String @"1-2 sentences explaining the classification, based only on question wording",
+  target_constructs: [String] @"1 to 3 standardized construct labels",
+  target_constructs_rationale: String @"1-2 sentences per construct explaining why each is relevant"
+}
+
+// LLM function for single row
+def GenerateOutput(job_role: String, interview_questions_only: String) -> ClassificationOutput {
+  use: dynamic_config
+  prompt: """
+You are an expert interview evaluation assistant. Classify each interview question and identify target constructs. Return one classification entry per interview question.
+
+Step 1: Pick question_type from: behavioral, situational, technical_job_knowledge, analytical_problem_solving, background_experience, motivation_self_description, other.
+Step 2: Provide question_type_rationale (1-2 sentences max) describing what the question does ("asks for...", "requests...", "probes...").
+Step 3: Pick 1-3 target_constructs (short standardized labels).
+Step 4: Provide target_constructs_rationale naming each construct. Format: "{c1}: [why]. {c2}: [why]."
+
+Return raw JSON only. Do NOT wrap in markdown code fences.
+
+
+JOB ROLE: ${job_role}
+INTERVIEW QUESTIONS: ${interview_questions_only}
+
+  """
+}
+
+// Data Processing
+def ProcessData() {
+  SQL("""
+  SELECT
+    template_version_id,
+    ANY_VALUE(job_role) AS job_role,
+    ANY_VALUE(
+      CAST(
+        list_transform(
+          CAST(interview_transcript AS JSON[]),
+          x -> json_object(
+            'question_number', CAST(x->>'question_number' AS INTEGER),
+            'question_text', x->>'question_text'
+          )
+        ) AS VARCHAR
+      )
+    ) AS interview_questions_only
+  FROM input_data
+  GROUP BY template_version_id
+  """)
+}
+
+// Batch runner - applies LLM to all rows
+def RunBatch() {
+  ProcessData()
+  |> map_row("result", GenerateOutput($job_role, $interview_questions_only))
+  |> explode("result")
+}
+// ============================================
+// METRICS EVALUATION
+// ============================================
+
+def CheckQuestionNumberInInput(interview_transcript: String, question_records: [Map<String, Any>]) {
+  let all_ok = true
+  for c in question_records {
+    let pattern = "\"question_number\"\\s*:\\s*\"?" + str(c["question_number"]) + "\"?"
+    let found = regex_match(interview_transcript, pattern)
+    if !found {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+def CheckQuestionTextInTranscript(interview_transcript: String, question_records: [Map<String, Any>]) {
+  let all_ok = true
+  for c in question_records {
+    let found = contains(interview_transcript, str(c["question_text"]))
+    if !found {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+llm_config gpt4omini {
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+}
+
+type QuestionClassification {
+  question_number: Int @"n",
+  question_text: String @"t",
+  question_type: String @"type",
+  question_type_rationale: String @"r",
+  target_constructs: [String] @"c",
+  target_constructs_rationale: String @"cr"
+}
+
+type ScopeResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P1_CheckClassificationFromQuestionOnly(classifications: [QuestionClassification]) -> ScopeResult {
+  use: gpt4omini
+  prompt: f"""
+Evaluate whether the rationales reference SPECIFIC content that could ONLY come from reading the candidate`s actual answer (e.g., specific names, tools, projects, companies, or outcomes mentioned in the response).
+
+ALLOWED in rationale (these describe what the question ASKS, not what the answer contains):
+- "asks for past example"
+- "probes candidate`s past actions" 
+- "inquires about the candidate`s experience"
+- "requests a hypothetical approach"
+- generic references to what category of content the question elicits
+
+NOT ALLOWED (these reference specific answer content):
+- "the candidate mentioned VBA macros"
+- "based on their internship at Prudential"
+- "the stakeholder disagreement they described"
+- any proper nouns, specific tools, companies, projects from the response
+
+Classifications:
+{classifications}
+
+Score 1 if EVERY rationale stays at the level of what the question asks (even if it uses generic language like "candidate`s past actions").
+Score 0 ONLY if a rationale references SPECIFIC content (names, tools, companies, projects, outcomes) that could only come from the actual answer.
+  """
+}
+
+llm_config gpt4omini {
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+}
+
+type QuestionClassification {
+  question_number: Int @"n",
+  question_text: String @"t",
+  question_type: String @"type",
+  question_type_rationale: String @"r",
+  target_constructs: [String] @"c",
+  target_constructs_rationale: String @"cr"
+}
+
+type CoverageResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P1_CheckConstructRationaleAddressesEach(classifications: [QuestionClassification]) -> CoverageResult {
+  use: gpt4omini
+  prompt: f"""
+Evaluate whether the target_constructs_rationale provides a reason for EACH construct listed in target_constructs.
+
+A construct is "addressed" if the rationale includes some explanation of why that construct is relevant. The explanation can use the exact construct label OR synonymous language — both count.
+
+Examples of addressed:
+- target_constructs: ["problem solving"], rationale: "problem solving: probes challenge structuring" ✓ (exact label)
+- target_constructs: ["collaboration"], rationale: "teamwork is probed through the question" ✓ (synonym)
+
+Example of NOT addressed:
+- target_constructs: ["communication", "leadership"], rationale: "asks about leadership approach" ✗ (communication not addressed)
+
+Classifications:
+{classifications}
+
+Score 1 if, for EVERY construct in EVERY classification, the rationale provides an explanation (exact-match or synonym).
+Score 0 ONLY if at least one construct has no corresponding explanation whatsoever in its rationale.
+  """
+}
+
+type QuestionClassification {
+  question_number: Int @"question number",
+  question_text: String @"question text",
+  question_type: String @"question type label",
+  question_type_rationale: String @"rationale",
+  target_constructs: [String] @"list of constructs",
+  target_constructs_rationale: String @"rationale"
+}
+
+def P1_CheckQuestionTypeValid(classifications: [QuestionClassification]) {
+  let all_ok = true
+  for c in classifications {
+    let valid = c.question_type == "behavioral" || c.question_type == "situational" || c.question_type == "technical_job_knowledge" || c.question_type == "analytical_problem_solving" || c.question_type == "background_experience" || c.question_type == "motivation_self_description" || c.question_type == "other"
+    if !valid {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+type QuestionClassification {
+  question_number: Int @"question number",
+  question_text: String @"question text",
+  question_type: String @"question type label",
+  question_type_rationale: String @"rationale",
+  target_constructs: [String] @"list of constructs",
+  target_constructs_rationale: String @"rationale"
+}
+
+def P1_CheckTargetConstructsCount(classifications: [QuestionClassification]) {
+  let all_ok = true
+  for c in classifications {
+    let n = len(c.target_constructs)
+    if n < 1 || n > 3 {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+// Complete pipeline: generate outputs and evaluate metrics
+def RunComplete() {
+  RunBatch()
+  |> map_row("checkquestionnumberininput", CheckQuestionNumberInInput($interview_questions_only, $classifications))
+  |> map_row("checkquestiontextintranscript", CheckQuestionTextInTranscript($interview_questions_only, $classifications))
+  |> map_row("p1_checkclassificationfromquestiononly", P1_CheckClassificationFromQuestionOnly($classifications))
+  |> map_row("p1_checkconstructrationaleaddresseseach", P1_CheckConstructRationaleAddressesEach($classifications))
+  |> map_row("p1_checkquestiontypevalid", P1_CheckQuestionTypeValid($classifications))
+  |> map_row("p1_checktargetconstructscount", P1_CheckTargetConstructsCount($classifications))
+}

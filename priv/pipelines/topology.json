@@ -1,0 +1,41 @@
+{
+  "pipeline_version": "smoke_test_Pipeline_2_2026-05-25",
+  "bundle_path": "smoke_test_Pipeline_2_2026-05-25-0423",
+  "stages": [
+    {
+      "id": "p1",
+      "lat": "stages/01_VI_P1_Classify_v1/lattice.lat",
+      "binds": ["input_data"],
+      "output_label": "p1_results",
+      "entrypoint": "RunBatch"
+    },
+    {
+      "id": "p2",
+      "lat": "stages/03_VI_P2_Extract_Evidence_v1/lattice.lat",
+      "binds": ["input_data"],
+      "output_label": "p2_results",
+      "entrypoint": "RunBatch"
+    },
+    {
+      "id": "p3",
+      "lat": "stages/05_VI_P3_Layer_1_Scoring_v2_per-question/lattice.lat",
+      "binds": ["input_data", "p2_results"],
+      "output_label": "p3_results",
+      "entrypoint": "RunBatch"
+    },
+    {
+      "id": "p4",
+      "lat": "stages/04_VI_P4_Layer_2_Scoring_v2_per-question/lattice.lat",
+      "binds": ["input_data", "p1_results", "p2_results"],
+      "output_label": "p4_results",
+      "entrypoint": "RunBatch"
+    },
+    {
+      "id": "p5",
+      "lat": "stages/02_VI_P5_Aggregate_v2/lattice.lat",
+      "binds": ["p4_results:input_data", "p3_results"],
+      "output_label": "p5_results",
+      "entrypoint": "RunBatch"
+    }
+  ]
+}

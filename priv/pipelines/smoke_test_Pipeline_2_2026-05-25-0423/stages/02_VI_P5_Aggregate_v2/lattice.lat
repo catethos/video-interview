@@ -1,0 +1,451 @@
+// ============================================
+// LATTICE PROMPT SESSION
+// Generated: 2026-05-24T04:45:04.535313Z
+// ============================================
+
+// REQUIRED INPUTS (set via Lattice.set_global before calling RunComplete):
+//   input_data           rows=?  sha256=(no hash)  "p4v2_session_9e2beaf1_100row.csv"
+//   p3_results           rows=?  sha256=(no hash)  "p3v2_session_8d9883c3_100row.csv"
+
+llm_config dynamic_config {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "google/gemini-3.1-flash-lite"
+  api_key_env: "OPENROUTER_API_KEY"
+  temperature: 0.0
+  max_tokens: 16000
+}
+
+type Layer3Output {
+  question_level_evaluation: [QuestionEval],
+  overall_insights: [String] @"3-5 candidate-level synthesis bullets, each anchored to job_description demands"
+}
+
+type QuestionEval {
+  question_number: Int @"matches the input question_number for downstream join",
+  overall_scoring_rationale: String @"1-2 sentences explaining the score using transcript and evidence content only",
+  score_insights: [String] @"2-3 recruiter-focused bullets interpreting the score against target_constructs"
+}
+
+// LLM function for single row
+def GenerateOutput(job_role: String, job_description: String, candidate_questions: String) -> Layer3Output {
+  use: dynamic_config
+  prompt: """
+You are an expert interview evaluation assistant trained in organizational psychology and the scoring of structured interview response quality. Your goal is to provide accurate, fair, and evidence-based interview evaluation summarization.
+
+PRINCIPLES
+- Use ONLY content from the input candidate_questions: each entry includes question_text, target_constructs, the candidate's answer_text, and the upstream P3 (layer1_scores) + P4 (layer2_scores) justifications.
+- Do NOT introduce new evidence not present in the input.
+- Do NOT infer traits beyond what the evidence supports.
+- Use tentative, evidence-based phrasing: "The response states...", "The candidate describes...", "Limited evidence of...", "The transcript does not provide clear evidence of...", "Probe / Validate / Verify..."
+- Do NOT use trait-overclaim phrases. SPECIFIC FORBIDDEN PATTERNS (these are violations even when they feel natural):
+    * "The candidate demonstrates [trait]" — say instead: "The response describes [observable action]"
+    * "The candidate shows [trait]" — say instead: "The response evidences [observable action]"
+    * "The candidate is [trait]" — say instead: "The response indicates [observable action]"
+    * "Strong [trait]" / "exceptional [trait]" / "clear [trait]" applied to the candidate — re-phrase to describe the observable response
+    * Verbs like "demonstrates", "shows", "exhibits" with the candidate as subject and a trait as object — banned. Use "the response" or "the answer" as subject instead.
+- The discipline: critique the RESPONSE, not the PERSON. "The response describes specific actions" is allowed; "The candidate demonstrates initiative" is not.
+
+JOB DESCRIPTION GROUNDING RULE
+- When citing role demands or program details in overall_insights, ONLY reference content LITERALLY PRESENT in the input job_description.
+- Do NOT invent role names, program names, scholarship names, job titles, or specific role functions that are not explicitly in the JD.
+- If the job_description is sparse, generic, or empty, write insights that ANCHOR TO WHATEVER IS PROVIDED ("the program emphasizes X", "the role mentions Y") or that explicitly note "the JD does not specify [Z], so role-fit assessment is provisional".
+- Specific failure mode to avoid: do not name a job title (e.g., "Maxis Scholarship", "Training and Development Manager", "Nanotechnology Engineering Technologist") unless that exact title appears in the input job_description.
+
+DO NOT PROJECT CANDIDATE TOPICS BACK ONTO THE JD
+- If candidate answers mention a field/topic (e.g., "nanotechnology"), do NOT treat it as a role requirement unless the JD explicitly states so.
+- For each overall_insights bullet: it must either anchor to specific JD text OR explicitly state "the JD does not specify [Z]". If neither, rephrase as a neutral candidate observation.
+- Be concise. Highlight both strengths and gaps.
+
+INPUTS YOU RECEIVE PER CANDIDATE
+- job_role
+- job_description
+- candidate_questions: a JSON array of question records. Each record contains:
+    question_number, question_text, question_type, target_constructs (list),
+    answer_text,
+    layer1_scores (Map: dimension -> {score, justification}),
+    layer2_scores (Map: dimension -> {score, justification}),
+    layer1_average, layer2_average, overall_score (PRE-COMPUTED in SQL — DO NOT recompute)
+
+INSTRUCTIONS
+
+Step 1: Per-question evaluation
+For each entry in candidate_questions, produce a question_level_evaluation entry with:
+  - question_number: must match the input entry's question_number
+  - overall_scoring_rationale: 1-2 sentences explaining why the pre-computed overall_score was assigned. Use input layer1/layer2 justifications and answer_text content. Distinguish strong evidence from missing evidence.
+  - score_insights: 2-3 bullets that INTERPRET the score with respect to that question's target_constructs. Each bullet must do ONE of:
+      (a) name a key capability signal supporting one of the target_constructs;
+      (b) name a critical limitation or missing evidence affecting evaluation of one of the target_constructs;
+      (c) state an implication for role performance.
+    Bullets must NOT just restate the score or paraphrase the rationale.
+
+Step 2: Candidate-level overall_insights
+Produce 3-5 bullets of synthesized, recruiter-oriented evaluation across all questions. Each bullet should:
+  - summarize a key strength pattern across responses, OR
+  - highlight a recurring critical risk or gap, OR
+  - identify a clear candidate pattern.
+Each bullet MUST be explicitly anchored to role demands stated in the job_description: explain how the observed strength or gap may support or limit performance in THIS role.
+
+OUTPUT
+Return raw JSON only — no markdown fences. Follow the schema appended at the end of this prompt.
+
+CRITICAL OUTPUT FORMAT:
+- Return ONLY the raw JSON object matching the Layer3Output schema.
+- Do NOT wrap the output in ```json fences or any markdown.
+- Do NOT prefix or suffix with any commentary, explanation, or whitespace before/after the JSON.
+- Your entire response MUST start with { and end with } — nothing else.
+
+
+JOB ROLE: ${job_role}
+
+JOB DESCRIPTION:
+${job_description}
+
+CANDIDATE QUESTIONS (JSON array — each entry has the full per-question context, scores, and upstream justifications):
+${candidate_questions}
+
+Generate the question_level_evaluation entries (one per question) and the candidate-level overall_insights, per the instructions in the system prompt.
+
+  """
+}
+
+// Data Processing
+def ProcessData() {
+  SQL("""
+  SELECT
+    i.custom_id,
+    i.job_role,
+    i.job_description,
+    json_group_array(
+      json_object(
+        'question_number', i.question_number,
+        'question_text', i.question_text,
+        'answer_text', i.answer_text,
+        'question_type', i.question_type,
+        'target_constructs', CAST(i.target_constructs AS JSON),
+        'layer1_scores', json_object(
+          'relevance_completeness', CAST(p3.relevance_completeness AS JSON),
+          'support_quality',        CAST(p3.support_quality AS JSON),
+          'clarity_coherence',      CAST(p3.clarity_coherence AS JSON)
+        ),
+        'layer2_scores', CAST(i.layer2_scores AS JSON),
+        'layer1_average', ROUND(
+          (CAST(json_extract(CAST(p3.relevance_completeness AS JSON), '$.score') AS INTEGER)
+           + CAST(json_extract(CAST(p3.support_quality AS JSON), '$.score') AS INTEGER)
+           + CAST(json_extract(CAST(p3.clarity_coherence AS JSON), '$.score') AS INTEGER)) / 3.0, 2
+        ),
+        'layer2_average', ROUND(
+          list_avg(list_transform(
+            json_keys(CAST(i.layer2_scores AS JSON)),
+            k -> CAST(json_extract(CAST(i.layer2_scores AS JSON), '$.' || k || '.score') AS INTEGER)
+          )), 2
+        ),
+        'overall_score', ROUND(
+          0.4 * (CAST(json_extract(CAST(p3.relevance_completeness AS JSON), '$.score') AS INTEGER)
+                 + CAST(json_extract(CAST(p3.support_quality AS JSON), '$.score') AS INTEGER)
+                 + CAST(json_extract(CAST(p3.clarity_coherence AS JSON), '$.score') AS INTEGER)) / 3.0
+          + 0.6 * list_avg(list_transform(
+              json_keys(CAST(i.layer2_scores AS JSON)),
+              k -> CAST(json_extract(CAST(i.layer2_scores AS JSON), '$.' || k || '.score') AS INTEGER)
+            )), 2
+        )
+      )
+    ) AS candidate_questions,
+    COUNT(*) AS n_questions
+  FROM input_data i
+  LEFT JOIN p3_results p3 ON i.custom_id = p3.custom_id AND i.question_number = p3.question_number
+  GROUP BY i.custom_id, i.job_role, i.job_description
+  ORDER BY i.custom_id
+  """)
+}
+
+// Batch runner - applies LLM to all rows
+def RunBatch() {
+  ProcessData()
+  |> map_row("result", GenerateOutput($job_role, $job_description, $candidate_questions))
+  |> explode("result")
+}
+// ============================================
+// METRICS EVALUATION
+// ============================================
+
+def P5v2_CheckQuestionStructure(
+  n_questions: Int,
+  question_level_evaluation: [Map<String, Any>]
+) {
+  n_questions == len(question_level_evaluation)
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type GroundednessResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P5v2_CheckRationaleGrounded(
+  candidate_questions: [Map<String, Any>],
+  question_level_evaluation: [Map<String, Any>]
+) -> GroundednessResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the per-question overall_scoring_rationale and score_insights in the evaluation are GROUNDED in the input data -- not hallucinated or invented.
+
+The input contains the source data per question (transcript answer, P3 layer1 justifications, P4 layer2 justifications, target_constructs, scores). The output should reference content from these sources.
+
+INPUT (source of truth -- candidate_questions):
+{candidate_questions}
+
+OUTPUT to evaluate (question_level_evaluation):
+{question_level_evaluation}
+
+SCOPE (critical):
+For each entry in question_level_evaluation:
+1. Match its question_number to the corresponding entry in candidate_questions. If no input matches the output's question_number, that is a HALLUCINATED question -> NOT GROUNDED.
+2. Verify that overall_scoring_rationale claims trace to the matched input's answer_text, layer1_scores justifications, or layer2_scores justifications.
+3. Verify that each score_insights bullet's claims similarly trace to the matched input.
+
+Do NOT evaluate score correctness.
+Do NOT evaluate writing quality or tone.
+Do NOT evaluate whether insights interpret correctly against target_constructs (covered by another metric).
+Only: is each claim TRACEABLE to the input data?
+
+IMPORTANT CONTEXT:
+This is speech-to-text from non-native English speakers; garbled words in answer_text are legitimate content.
+
+GROUNDED (score 1) examples:
+- Rationale cites "VBM macros adopted by pricing team" -> input answer_text says "VBM macro... was later adopted by the pricing team" -> GROUNDED
+- Insight says "Limited evidence of learning agility: no explicit takeaways stated" -> the input layer1 justifications note absence of learning content -> GROUNDED (citing absences observed in input is fine)
+- Insight references "specific actions described" -> input layer2 justifications include behavioral_evidence content about specific actions -> GROUNDED
+
+NOT GROUNDED (score 0) examples:
+- Rationale references "the candidate's MBA from Wharton" -> no such content in any input field -> HALLUCINATED
+- Insight cites "led a team of 12 engineers" -> input answer mentions no team leadership -> FABRICATED
+- Output has question_number 99 -> no question 99 in input -> HALLUCINATED QUESTION
+- Insight claims a SPECIFIC numeric outcome ("40% efficiency gain") not present in input -> FABRICATED
+
+Scoring rules:
+- Score 1 if ALL rationales and score_insights across ALL questions trace to input content (or correctly note absences observed in input).
+- Score 0 if ANY claim is fabricated, OR if any output question_number does not match an input question_number.
+
+In your reason, cite the specific question_number and the ungrounded claim, if any.
+"""
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type HedgedResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P5v2_CheckRationaleHedged(
+  overall_insights: [String],
+  question_level_evaluation: [Map<String, Any>]
+) -> HedgedResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether all prose content uses evidence-anchored language. The bar is RECRUITER-STYLE professional synthesis -- NOT clinical hedging on every word.
+
+Prose content to evaluate:
+
+1. Per-question rationale + score_insights:
+{question_level_evaluation}
+
+2. Candidate-level overall_insights:
+{overall_insights}
+
+SCOPE (critical):
+Only evaluate TONE and LANGUAGE.
+Do NOT evaluate score correctness, grounding, or whether insights interpret correctly -- those are covered by other metrics.
+Only: does the language make BARE, UNSUPPORTED, CERTAINTY-LADEN trait claims about the candidate as a person?
+
+THE BAR (important -- read carefully):
+This is recruiter-style candidate synthesis. State-of-mind / capability / motivation vocabulary IS ACCEPTABLE when used to describe observable response patterns. The goal is to prevent BARE, UNSUPPORTED, CERTAINTY-LADEN trait claims -- not to ban all candidate-related vocabulary.
+
+KEY HEURISTIC -- think in terms of two failure conditions, BOTH of which must be present to fail:
+  (1) The phrase claims a trait/capability/state-of-mind as a PROPERTY OF THE CANDIDATE AS A PERSON, AND
+  (2) The phrase uses CERTAINTY language ("is", "has", "proves", "definitely", "clearly", "obviously") OR makes the claim with NO observable anchor.
+
+If only (1) is present (e.g., "motivation to work on the shop floor" -- a state-of-mind noun, but no certainty marker, and clearly summarizing observed response content), it is ACCEPTABLE.
+If only (2) is present (e.g., "the response clearly states X" -- certainty about an observable response, not about the candidate), it is ACCEPTABLE.
+
+ACCEPTABLE (score 1) phrasings (all of these PASS, this is the recruiter-style bar):
+- "The response states / describes / indicates..."
+- "Motivation to work on the shop floor indicates baseline fit" -- state-of-mind, no certainty marker, tied to observable interest
+- "Suggesting trainability but also a need to validate hands-on execution" -- inferred + hedged with "suggesting"
+- "Willingness to adapt is indicated by stating Y" or "Willingness to learn is suggested by..." -- state-of-mind tied to evidence
+- "Strength in stakeholder alignment and influence under time pressure" -- capability claim BUT phrased as observed pattern
+- "Demonstrates effective stakeholder management by [cited specific behavior]" -- response-anchored
+- "Limited evidence of learning agility: no explicit takeaways stated" -- describes observable absence
+- "Communication is generally structured, aiding clarity of motivation" -- describes the response
+- "Stated scope (process design to support new products) aligns with technical/production trainee pathways" -- ties stated content to role
+- "This provides limited/moderate/strong response evidence because..."
+- "Probe / Validate / Verify further" -- recommendations are not trait claims
+- Bullets that name a trait/state IN PASSING as part of synthesis, even without explicit hedging on every word, are FINE if they read as observed patterns rather than bare assertions.
+
+NOT ACCEPTABLE (score 0) phrasings -- only THESE fail:
+- "The candidate is highly adaptable" -- bare property claim with certainty
+- "This proves they are a strong leader" -- explicit certainty + bare trait
+- "They definitely have strong communication skills" -- explicit certainty + capability
+- "The candidate clearly understands the role" -- explicit certainty + state-of-mind
+- "Evidence of strong analytical ability" with NO cited evidence -- bare trait inference
+- "The candidate obviously..." anything -- explicit certainty
+- "Demonstrates exceptional [trait]" with NO cited specific behavior -- bare claim
+
+KEY: when in doubt, GIVE THE BENEFIT OF THE DOUBT. Recruiter-style synthesis is allowed to use vocabulary like "motivation", "willingness", "desire", "interest", "strength", "capability" when summarizing observed patterns. Only fail when the phrase is BOTH (1) a bare trait claim about the candidate as a person AND (2) uses certainty markers OR has no anchor at all.
+
+WORDING RULES:
+- The word "clearly" is ACCEPTABLE when describing response structure ("flows clearly", "clearly organized"). It is NOT ACCEPTABLE when claiming a trait about the candidate ("the candidate is clearly confident").
+- "Demonstrates X by Y" (with Y = specific behavior) is ACCEPTABLE.
+- "Demonstrates X" alone (no Y) is borderline -- accept if X is a behavior noun (e.g., "effective stakeholder management"), fail if X is a personality trait noun without context (e.g., "exceptional leadership" with no cited example).
+
+Scoring rules:
+- Score 1 if the prose reads as professional recruiter-style synthesis (the user's spec example output is the model: phrases like "Strength in stakeholder alignment under time pressure", "Motivation to work on the shop floor indicates baseline fit", "Suggesting trainability" all PASS).
+- Score 0 ONLY if the content makes a CLEAR bare-trait + certainty claim, OR an unanchored personality assertion.
+- Default to score 1 unless a clear violation exists.
+
+In your reason, cite the specific overclaiming phrase and explain why it crosses the bar (bare trait + certainty), if any. If you're failing on borderline state-of-mind vocabulary that's tied to observed patterns, reconsider and score 1.
+"""
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type InsightsInterpretResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P5v2_CheckInsightsInterpret(
+  candidate_questions: [Map<String, Any>],
+  question_level_evaluation: [Map<String, Any>]
+) -> InsightsInterpretResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the score_insights INTERPRET each question's score against the target_constructs, rather than merely RESTATE the score or paraphrase the rationale.
+
+The spec for score_insights:
+- 2-3 recruiter-focused bullets per question
+- Each bullet should focus on: (a) key capability signals supporting the target_constructs, OR (b) critical limitation/missing evidence affecting evaluation of the target_constructs, OR (c) implication for role performance
+- Bullets MUST refer back to the question's target_constructs (the abilities being assessed)
+- Bullets must NOT just say "the score is X because Y" -- that is rationale, not interpretation
+
+INPUT (per-question target_constructs and scores -- candidate_questions):
+{candidate_questions}
+
+OUTPUT score_insights to evaluate (question_level_evaluation):
+{question_level_evaluation}
+
+SCOPE (critical):
+For each question's score_insights bullets:
+1. Does the bullet connect to one or more target_constructs of that question (the abilities being evaluated)?
+2. Does it interpret what the score means for capability / role readiness, or does it just restate score reasoning (which is rationale's job)?
+
+Do NOT evaluate grounding (covered by another metric).
+Do NOT evaluate tone/hedging (covered by another metric).
+Do NOT evaluate the overall_scoring_rationale (only evaluate score_insights).
+
+INTERPRETIVE (score 1) examples:
+- target_constructs: ["problem_solving", "learning_orientation"]
+  Bullet: "Limited evidence of learning agility: no explicit takeaways stated" -> connects to learning_orientation, interprets a gap -> INTERPRETIVE
+- target_constructs: ["stakeholder_management", "influence/negotiation"]
+  Bullet: "Demonstrates effective stakeholder management by resolving the calculation-method dispute" -> connects to stakeholder_management, interprets capability signal -> INTERPRETIVE
+- target_constructs: ["role_fit", "motivation_alignment"]
+  Bullet: "Probe specific machine/process exposures to validate fit for factory operations" -> implication for role performance + tied to role fit construct -> INTERPRETIVE
+
+NON-INTERPRETIVE (score 0) examples:
+- Bullet: "The score is 3 because the response was generally good" -> just restates score -> NON-INTERPRETIVE
+- Bullet: "The candidate's response addressed the question" -> generic observation, not tied to target_constructs -> NON-INTERPRETIVE (no construct connection)
+- Bullet: "The justifications mention specific actions" -> describes what the rationale says, doesn't interpret for capability -> NON-INTERPRETIVE
+
+Scoring rules:
+- Score 1 if MOST score_insights bullets across ALL questions interpret against target_constructs (capability signal, gap signal, or role implication).
+- Score 0 if MOST bullets just restate score reasoning, fail to connect to target_constructs, or are generic non-interpretive observations.
+- A few weak bullets among many strong ones is OK; consistent failure to interpret is not.
+
+In your reason, cite the specific question_number and an example weak bullet, if any.
+"""
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+  max_tokens: 4000
+}
+
+type RoleAnchorResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P5v2_CheckOverallInsightsRoleAnchored(
+  job_description: String,
+  overall_insights: [String]
+) -> RoleAnchorResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether the candidate-level overall_insights are explicitly ANCHORED to the role demands described in the job description, rather than being generic platitudes.
+
+Job description:
+{job_description}
+
+Overall insights to evaluate:
+{overall_insights}
+
+SCOPE (critical):
+For each bullet in overall_insights:
+1. Does it cite or reference specific elements of the job description (role responsibilities, qualifications, program structure, target environment, etc.)?
+2. OR does it explicitly explain HOW the observed strength/gap may support or limit performance in THIS role?
+3. Or is it a generic observation that could apply to any role ("good problem solver", "motivated candidate", "shows learning agility")?
+
+Do NOT evaluate grounding to transcript content (covered by another metric).
+Do NOT evaluate tone/hedging (covered by another metric).
+Only: do the bullets tie observations to THIS specific role/JD?
+
+ROLE-ANCHORED (score 1) examples:
+- JD mentions "3-year management trainee program with cross-functional rotations" — bullet says "Experience appears early-stage (~1 year), suggesting trainability for the structured 3-year MT program but a need to validate hands-on collaboration with operators across rotations" — ties experience level to program structure -> ROLE-ANCHORED
+- JD mentions "distributor and customer-facing coordination in Marketing/Sales within Healthcare Nutrition" — bullet says "Strength in stakeholder alignment and influence under time pressure, a strong fit for distributor- and customer-facing coordination in Marketing/Sales within Healthcare Nutrition" — explicit role tie -> ROLE-ANCHORED
+- JD mentions "data-driven decision-making" — bullet says "To meet role demands for rapid, data-driven decision-making, the candidate should strengthen quantification of impact and post-decision follow-through" — explicit demand link -> ROLE-ANCHORED
+
+NOT ROLE-ANCHORED (score 0) examples:
+- Bullet: "The candidate is a strong communicator" -> generic, no tie to JD -> NOT ROLE-ANCHORED
+- Bullet: "Recommend further interviews to validate experience" -> generic next step, no role specificity -> NOT ROLE-ANCHORED
+- Bullet: "Shows good problem solving across responses" -> generic strength claim, no role tie -> NOT ROLE-ANCHORED
+- Bullet: "Could improve on quantifying impact" -> generic gap, no role tie -> NOT ROLE-ANCHORED
+
+IMPORTANT:
+If the job_description is empty or very brief, the bar should be lower -- bullets just need to tie to whatever role context IS provided. Pass with benefit of the doubt.
+
+Scoring rules:
+- Score 1 if MOST overall_insights bullets are role-anchored (cite JD content OR tie observations to role demands).
+- Score 0 if MOST bullets are generic platitudes that could apply to any role.
+- A few weak bullets among many strong ones is OK; consistent failure to anchor is not.
+
+In your reason, cite the specific generic bullet(s), if any.
+"""
+}
+
+// Complete pipeline: generate outputs and evaluate metrics
+def RunComplete() {
+  RunBatch()
+  |> map_row("p5v2_checkquestionstructure", P5v2_CheckQuestionStructure($n_questions, $question_level_evaluation))
+  |> map_row("p5v2_checkrationalegrounded", P5v2_CheckRationaleGrounded($candidate_questions, $question_level_evaluation))
+  |> map_row("p5v2_checkrationalehedged", P5v2_CheckRationaleHedged($overall_insights, $question_level_evaluation))
+  |> map_row("p5v2_checkinsightsinterpret", P5v2_CheckInsightsInterpret($candidate_questions, $question_level_evaluation))
+  |> map_row("p5v2_checkoverallinsightsroleanchored", P5v2_CheckOverallInsightsRoleAnchored($job_description, $overall_insights))
+}

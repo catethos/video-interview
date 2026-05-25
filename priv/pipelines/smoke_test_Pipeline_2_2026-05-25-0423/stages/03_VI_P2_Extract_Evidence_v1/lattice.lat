@@ -1,0 +1,301 @@
+// ============================================
+// LATTICE PROMPT SESSION
+// Generated: 2026-05-10T14:10:26.353218Z
+// ============================================
+
+llm_config dynamic_config {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "google/gemini-2.5-flash"
+  api_key_env: "OPENROUTER_API_KEY"
+  temperature: 0.0
+  max_tokens: 16000
+}
+
+type EvidenceOutput {
+  question_evidences: [QuestionEvidence] @"One evidence entry per interview question in the transcript"
+}
+
+type QuestionEvidence {
+  question_number: Int @"The sequence number of the question in the interview (1 for first, 2 for second, etc.)",
+  question_text: String @"Exact wording of the question from the transcript, verbatim",
+  evidence: Evidence @"Structured evidence extracted from the candidate response, categorized across 9 buckets",
+  evidence_gaps: [String] @"Elements missing from the response that would strengthen it (e.g., no timeline given, no outcome stated, no specific numbers). Each item is a one-sentence description of a gap. List the most material gaps, typically 3-10 items.",
+  ambiguities: [String] @"Parts of the response that are unclear, vague, or could be interpreted multiple ways. Each item is a one-sentence description of an ambiguity. List the most material ambiguities, typically 3-10 items."
+}
+
+type Evidence {
+  actions: [String] @"Explicit past actions or steps the candidate described taking. Use candidate wording where possible.",
+  outcomes: [String] @"Outcomes or results the candidate explicitly mentioned. Do NOT infer results not stated.",
+  reasoning: [String] @"Reasoning steps or rationale the candidate articulated.",
+  technical_knowledge: [String] @"Specific technical concepts, tools, methods, or domain knowledge the candidate demonstrated. Only include what was explicitly mentioned.",
+  decision_logic: [String] @"The logic or criteria behind the candidate decisions.",
+  motivations: [String] @"Motivations, reasons, or drivers the candidate stated.",
+  self_claims: [String] @"Claims the candidate made about their own skills, traits, or capabilities. Include claims without requiring proof.",
+  examples: [String] @"Concrete, specific examples or situations the candidate described.",
+  tradeoffs: [String] @"Trade-offs, constraints, or compromises the candidate acknowledged."
+}
+
+// LLM function for single row
+def GenerateOutput(interview_transcript: String) -> EvidenceOutput {
+  use: dynamic_config
+  prompt: """
+You are an interview evidence extraction expert. Your task is to extract ONLY explicit, observable evidence from an interview transcript.
+
+For each interview question, extract:
+  evidence:
+    - actions: past actions explicitly described
+    - outcomes: outcomes/results mentioned
+    - reasoning: reasoning/logic articulated
+    - technical_knowledge: specific concepts, tools, methods
+    - decision_logic: decision criteria
+    - motivations: stated motivations
+    - self_claims: claims about own skills/traits
+    - examples: concrete examples
+    - tradeoffs: trade-offs mentioned
+  evidence_gaps: missing elements (3-10 most material)
+  ambiguities: unclear parts (3-10 most material)
+
+RULES:
+- Do NOT infer intent, capability, personality, emotional tone, or delivery.
+- Do NOT paraphrase beyond meaning. Use candidate wording where possible.
+- Do NOT add information not present.
+- If no evidence exists for a category, leave that array empty.
+- For each evidence item, be concise.
+
+Return raw JSON only. Do NOT wrap in markdown code fences.
+
+
+INTERVIEW TRANSCRIPT:
+${interview_transcript}
+
+  """
+}
+
+// Data Processing
+def ProcessData() {
+  SQL("""
+  SELECT *,
+    CAST(
+      list_transform(
+        CAST(interview_transcript AS JSON[]),
+        x -> json_object(
+          'question_number', CAST(x->>'question_number' AS INTEGER),
+          'question_text', x->>'question_text'
+        )
+      ) AS VARCHAR
+    ) AS interview_questions_only
+  FROM input_data
+  """)
+}
+
+// Batch runner - applies LLM to all rows
+def RunBatch() {
+  ProcessData()
+  |> map_row("result", GenerateOutput($interview_transcript))
+  |> explode("result")
+}
+// ============================================
+// METRICS EVALUATION
+// ============================================
+
+def CheckQuestionNumberInInput(interview_transcript: String, question_records: [Map<String, Any>]) {
+  let all_ok = true
+  for c in question_records {
+    let pattern = "\"question_number\"\\s*:\\s*\"?" + str(c["question_number"]) + "\"?"
+    let found = regex_match(interview_transcript, pattern)
+    if !found {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+def CheckQuestionTextInTranscript(interview_transcript: String, question_records: [Map<String, Any>]) {
+  let all_ok = true
+  for c in question_records {
+    let found = contains(interview_transcript, str(c["question_text"]))
+    if !found {
+      all_ok = false
+    }
+  }
+  all_ok
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+}
+
+type FidelityResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P2_CheckEvidenceFidelity(interview_transcript: String, question_evidences: [Map<String, Any>]) -> FidelityResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether evidence items preserve the candidate's original wording without heavy paraphrasing.
+
+Each item in question_evidences has these fields:
+  - question_number: integer
+  - question_text: string
+  - evidence: object with 9 arrays (actions, outcomes, reasoning, technical_knowledge, decision_logic, motivations, self_claims, examples, tradeoffs)
+  - evidence_gaps: array of strings -- IGNORE THIS FIELD for scoring
+  - ambiguities: array of strings -- IGNORE THIS FIELD for scoring
+
+Interview transcript:
+{interview_transcript}
+
+Full output to evaluate:
+{question_evidences}
+
+SCOPE (critical):
+ONLY evaluate items INSIDE the 9 evidence arrays (actions, outcomes, reasoning, technical_knowledge, decision_logic, motivations, self_claims, examples, tradeoffs).
+
+The evidence_gaps and ambiguities fields are OUT OF SCOPE. Do not use them to decide paraphrasing. Having many gaps or ambiguities does NOT mean low fidelity -- those are about completeness, not faithfulness.
+
+IMPORTANT CONTEXT:
+This is speech-to-text from non-native English speakers. Transcript contains garbled words, fragments, and mis-transcriptions. Preserving garbled phrases verbatim counts as HIGH FIDELITY. Cleaning up grammar while preserving meaning is acceptable.
+
+FIDELITY = verbatim or close-quote preservation. NOT about completeness, clarity, or accuracy of the underlying content.
+
+HIGH FIDELITY (score 1) examples:
+- Candidate said \"I helped lead the team through a difficult Q3\"
+  -> actions: \"led team through difficult Q3\"  (shortened, same wording, OK)
+- Candidate said \"we used Power BI to build the dashboard\"
+  -> technical_knowledge: \"Power BI for dashboard building\"  (reordered, same meaning, OK)
+- Candidate said garbled \"reflect that lens\"
+  -> self_claims: includes \"reflect that lens\"  (garbled verbatim preserved, OK)
+
+LOW FIDELITY (score 0) examples:
+- Candidate said \"I worked on some Excel tasks\"
+  -> actions: \"executed complex data transformation workflows in Excel\"  (synthesized beyond what was said)
+- Candidate said \"I talked to my supervisor\"
+  -> actions: \"proactively negotiated with leadership to secure buy-in\"  (rephrased with unstated nuance)
+- Candidate said \"I managed it well\"
+  -> outcomes: \"demonstrated exceptional leadership resulting in measurable KPI improvements\"  (fabricated embellishment)
+
+Scoring rules:
+- Score 1 if all items in the 9 evidence arrays stay close to the candidate's original wording with same meaning (verbatim, shortened, or lightly reordered).
+- Score 0 ONLY if any item in the 9 evidence arrays is heavily paraphrased, reworded with added nuance, or synthesized beyond what the candidate said.
+- Do NOT score 0 because of gaps or ambiguities -- those are scored by a different metric.
+- Do NOT score 0 because the output is incomplete or vague -- that's about completeness, not fidelity.
+
+In your reason, cite the specific item(s) that broke the rule, if any, and quote the relevant transcript phrase.
+  """
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+}
+
+type GroundednessResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P2_CheckEvidenceGroundedInTranscript(interview_transcript: String, question_evidences: [Map<String, Any>]) -> GroundednessResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether evidence items are traceable to explicit content in the interview transcript.
+
+Each item in question_evidences has these fields:
+  - question_number: integer
+  - question_text: string
+  - evidence: object with 9 arrays (actions, outcomes, reasoning, technical_knowledge, decision_logic, motivations, self_claims, examples, tradeoffs)
+  - evidence_gaps: array of strings -- IGNORE THIS FIELD for scoring
+  - ambiguities: array of strings -- IGNORE THIS FIELD for scoring
+
+Interview transcript:
+{interview_transcript}
+
+Full output to evaluate:
+{question_evidences}
+
+SCOPE (critical):
+ONLY evaluate items INSIDE the 9 evidence arrays (actions, outcomes, reasoning, technical_knowledge, decision_logic, motivations, self_claims, examples, tradeoffs).
+
+The evidence_gaps and ambiguities fields are meta-observations about what is MISSING or UNCLEAR in the transcript -- they are NOT evidence items and MUST NOT be scored for grounding. Do not cite items from these fields.
+
+IMPORTANT CONTEXT:
+This is speech-to-text from non-native English speakers. The transcript will contain garbled words, mis-transcriptions, and fragmented speech. Treat these as legitimate content -- if an evidence item includes a garbled phrase that APPEARS in the transcript (even if the transcription is imperfect), it is GROUNDED. Do not flag mis-transcriptions as ungrounded.
+
+GROUNDED (score 1) examples:
+- Candidate said \"I couldn't compromise on quality in my career\"
+  -> motivations: \"couldn't compromise on quality\"  (direct quote, OK)
+- Candidate said \"I used Power BI for the dashboard\"
+  -> technical_knowledge: \"Power BI for dashboards\"  (same meaning, shortened, OK)
+- Transcript has garbled phrase \"reflect that lens\"
+  -> self_claims: includes \"reflect that lens\"  (garbled but verbatim from transcript, OK)
+- Candidate said \"the stakeholder agreed\"
+  -> outcomes: \"stakeholder agreed to the adjusted approach\"  (OK, light context addition)
+
+NOT GROUNDED (score 0) examples:
+- Candidate said \"I worked hard on the project\"
+  -> motivations: \"driven by excellence and ambition\"  (invented motivation NOT in transcript)
+- Candidate said \"I used Excel\"
+  -> technical_knowledge: \"advanced Excel with pivot tables and VBA\"  (added details not claimed)
+- Candidate said nothing about supporting family
+  -> motivations: \"supporting family members\"  (fabricated from nothing)
+
+Scoring rules:
+- Score 1 if EVERY item across the 9 evidence arrays can be traced to something the candidate explicitly said (including garbled/mis-transcribed words that appear in the transcript).
+- Score 0 ONLY if an item in the 9 evidence arrays introduces content the candidate did NOT explicitly say.
+- Do NOT score 0 because a term is ambiguous, garbled, or context is unclear -- evidence_gaps and ambiguities cover those separately.
+- Do NOT score 0 for items from evidence_gaps or ambiguities fields -- out of scope.
+
+In your reason, cite the specific evidence-array item(s) that broke the rule, if any, and quote the relevant part of the transcript you checked against.
+  """
+}
+
+llm_config qwen {
+  base_url: "https://openrouter.ai/api/v1"
+  model: "qwen/qwen3.5-122b-a10b"
+  api_key_env: "OPENROUTER_API_KEY"
+}
+
+type GapsResult {
+  reason: String @"brief explanation in one sentence",
+  score: Int @"0 or 1"
+}
+
+def P2_CheckGapsAndAmbiguitiesIdentified(interview_transcript: String, question_evidences: [Map<String, Any>]) -> GapsResult {
+  use: qwen
+  prompt: f"""
+Evaluate whether evidence_gaps and ambiguities reasonably reflect response quality.
+
+Each item in question_evidences has this structure:
+  - question_number: integer
+  - question_text: string
+  - evidence: object with 9 arrays (actions, outcomes, reasoning, technical_knowledge, decision_logic, motivations, self_claims, examples, tradeoffs)
+  - evidence_gaps: array of strings (missing elements)
+  - ambiguities: array of strings (unclear parts)
+
+Interview transcript:
+{interview_transcript}
+
+Extracted evidence:
+{question_evidences}
+
+What we expect (not strictly required):
+- If a response is OBVIOUSLY weak (one sentence, no specifics, generic claim) and has multiple empty evidence arrays, the evidence_gaps should NOT be empty
+- If a response contains OBVIOUSLY vague statements (unclear dates, unclear metrics, unclear references), ambiguities should NOT be empty
+- For clear, complete responses, empty arrays are fine
+
+Score 1 if gaps and ambiguities are REASONABLE for the response quality. Give benefit of the doubt -- minor gaps don't need to be flagged. Not every ambiguous word needs listing.
+Score 0 ONLY if an OBVIOUSLY thin response has empty evidence_gaps, OR an OBVIOUSLY vague response has empty ambiguities.
+  """
+}
+
+// Complete pipeline: generate outputs and evaluate metrics
+def RunComplete() {
+  RunBatch()
+  |> map_row("checkquestionnumberininput", CheckQuestionNumberInInput($interview_transcript, $question_evidences))
+  |> map_row("checkquestiontextintranscript", CheckQuestionTextInTranscript($interview_transcript, $question_evidences))
+  |> map_row("p2_checkevidencefidelity", P2_CheckEvidenceFidelity($interview_transcript, $question_evidences))
+  |> map_row("p2_checkevidencegroundedintranscript", P2_CheckEvidenceGroundedInTranscript($interview_transcript, $question_evidences))
+  |> map_row("p2_checkgapsandambiguitiesidentified", P2_CheckGapsAndAmbiguitiesIdentified($interview_transcript, $question_evidences))
+}
