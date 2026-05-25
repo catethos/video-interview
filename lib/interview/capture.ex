@@ -84,15 +84,23 @@ defmodule Interview.Capture do
   """
   def ensure_session_questions(%Session{} = session) do
     questions = list_questions(session)
+    version = Repo.get!(Version, session.template_version_id)
     now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 
+    # Assign the candidate's display order once, here, then freeze it via the
+    # on_conflict: :nothing below — so a refresh/resume never reshuffles.
+    ordered = if version.randomize_questions, do: Enum.shuffle(questions), else: questions
+
     rows =
-      Enum.map(questions, fn q ->
+      ordered
+      |> Enum.with_index(1)
+      |> Enum.map(fn {q, display_order} ->
         %{
           id: Ecto.UUID.generate(),
           session_id: session.id,
           template_question_id: q.id,
           position: q.position,
+          display_order: display_order,
           inserted_at: now,
           updated_at: now
         }
@@ -114,6 +122,24 @@ defmodule Interview.Capture do
     from(sq in SessionQuestion,
       where: sq.session_id == ^session.id,
       order_by: sq.position
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Template questions in the candidate's display order for this session — the
+  per-session shuffle when the version randomizes, template order otherwise.
+  Falls back to `position` for rows predating `display_order`. This is the
+  order the capture iframe walks; scoring + the recruiter report keep using
+  the canonical `template_questions.position`.
+  """
+  def list_questions_in_display_order(%Session{} = session) do
+    from(sq in SessionQuestion,
+      where: sq.session_id == ^session.id,
+      join: q in Question,
+      on: q.id == sq.template_question_id,
+      order_by: [asc: coalesce(sq.display_order, sq.position)],
+      select: q
     )
     |> Repo.all()
   end
