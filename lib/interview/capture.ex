@@ -688,6 +688,7 @@ defmodule Interview.Capture do
           updated = Repo.get!(Session, session_id)
           _ = Interview.Webhooks.enqueue(updated, "session.ready")
           broadcast_session_state(updated)
+          maybe_enqueue_scoring(updated)
         end
 
         :ok
@@ -702,6 +703,24 @@ defmodule Interview.Capture do
   per PLAN §12.5 — never the Postgres LISTEN/NOTIFY adapter over Neon.
   """
   def session_topic(session_id) when is_binary(session_id), do: "session:" <> session_id
+
+  # Enqueue scoring on the submitted→ready transition (fires once). Whisper
+  # transcripts are still landing at this point, so the worker snoozes via
+  # ScoringExport :not_ready until they're in — we enqueue here rather than
+  # gate on transcript readiness (rollup runs at finalize, before Whisper, so
+  # a readiness gate would never fire). Skip entirely when transcripts are
+  # off: scoring needs answer_text, so without them the worker would snooze
+  # forever. The worker's `unique` collapses any duplicate enqueue.
+  defp maybe_enqueue_scoring(%Session{} = session) do
+    if Interview.Transcripts.enabled?() do
+      _ =
+        %{session_id: session.id}
+        |> Interview.Workers.ScorePipeline.new()
+        |> Oban.insert()
+    end
+
+    :ok
+  end
 
   defp broadcast_session_state(%Session{} = session) do
     Phoenix.PubSub.broadcast(

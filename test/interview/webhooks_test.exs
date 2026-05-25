@@ -8,6 +8,7 @@ defmodule Interview.WebhooksTest do
   alias Interview.Tenants.Tenant
   alias Interview.Webhooks
   alias Interview.Webhooks.Delivery
+  alias Interview.Workers.ScorePipeline
   alias Interview.Workers.WebhookDelivery
 
   defp configured_tenant!(opts \\ []) do
@@ -455,6 +456,22 @@ defmodule Interview.WebhooksTest do
         |> Enum.sort()
 
       assert events == ["session.ready", "session.submitted"]
+    end
+
+    test "also enqueues ScorePipeline when the session becomes ready" do
+      tenant = configured_tenant!()
+      version = Interview.Fixtures.version!(Interview.Fixtures.template!(tenant.id).id)
+      q = Interview.Fixtures.question!(version.id, 1, %{required: true})
+      session = Interview.Fixtures.session!(tenant.id, version.id, %{state: "in_progress"})
+
+      {:ok, response, _} = Capture.claim_instance(session, q, 1, "cap-A")
+      {:ok, _} = Capture.record_capture_complete(response.id, "cap-A", 100)
+      {:ok, %Session{state: "submitted"}} = Capture.submit_session(session)
+
+      {:ok, _} =
+        Capture.mark_ready(response.id, %{storage_key: "x", duration_ms: 1000, format: "mp4"})
+
+      assert_enqueued(worker: ScorePipeline, args: %{"session_id" => session.id})
     end
   end
 end
