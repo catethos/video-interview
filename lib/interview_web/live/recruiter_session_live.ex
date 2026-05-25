@@ -27,10 +27,19 @@ defmodule InterviewWeb.RecruiterSessionLive do
         recruiter = socket.assigns.current_recruiter
         tenant = socket.assigns.tenant
 
+        # The order this candidate actually saw (canonical question numbers in
+        # display sequence). The report itself stays canonical; this is audit
+        # transparency for the dev debug panel.
+        shown_order =
+          detail.session
+          |> Capture.list_questions_in_display_order()
+          |> Enum.map(& &1.position)
+
         {:ok,
          socket
          |> assign(:not_found, false)
          |> assign(:detail, detail)
+         |> assign(:shown_order, shown_order)
          |> assign(:show_debug, dev_recruiter?(recruiter, tenant))
          |> assign(:expanded_transcripts, MapSet.new())}
     end
@@ -207,6 +216,9 @@ defmodule InterviewWeb.RecruiterSessionLive do
 
         <details :if={@show_debug} class="text-xs opacity-70" id="debug-panel">
           <summary>Debug · all attempts</summary>
+          <p :if={@shown_order != []} class="mt-2" id="shown-order">
+            Shown order (candidate sequence): {Enum.join(@shown_order, ", ")}
+          </p>
           <ul class="mt-2 space-y-2">
             <li :for={card <- @detail.questions}>
               <strong>Q{card.template_question.position}</strong>
